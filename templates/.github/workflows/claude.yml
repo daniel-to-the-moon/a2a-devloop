@@ -94,6 +94,9 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
+          # 完整输出（可选，仓库变量 CLAUDE_SHOW_FULL_OUTPUT=true 开启）：失败时日志里能看到实际报错。
+          # 日志含全部工具执行结果；以 secrets 登记的密钥会被 GitHub 自动打码。公开仓库不要开启。
+          show_full_output: ${{ vars.CLAUDE_SHOW_FULL_OUTPUT == 'true' }}
           prompt: |
             你是本仓库的代码执行者 Claude（devloop 循环，见 docs/DEVLOOP.md）。
             本任务的 GitHub 令牌是只读的：你不能也不需要推送、开 PR 或评论。改完后只在本地 git commit，发布由后续任务完成。
@@ -155,8 +158,10 @@ jobs:
 
   publish:
     needs: work
-    # work 失败或超时也运行：把失败说明发出去并加 needs-user，循环不会无声卡住
-    if: always() && needs.work.result != 'skipped'
+    # work 失败也运行：把失败说明发出去并加 needs-user，循环不会无声卡住。
+    # work 被取消（同一编号的新任务排进 concurrency 队列时，旧的排队任务会被取消）则不发：否则会留下误导性的
+    # “失败”说明并错误地加上 needs-user。Claude 步骤有比任务更短的超时，正常超时表现为 failure 而不是 cancelled。
+    if: always() && needs.work.result != 'skipped' && needs.work.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

@@ -37,7 +37,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 4. **仓库设置**：
    - 标签：`gh label create devloop|needs-user|hold`
    - 允许 Actions 开 PR：`gh api -X PUT repos/<repo>/actions/permissions/workflow -f default_workflow_permissions=read -F can_approve_pull_request_reviews=true`
-   - 变量：`gh variable set CLAUDE_MODEL --body <模型 id>`；用网关时 `gh variable set ANTHROPIC_BASE_URL --body <网关地址>`
+   - 变量：`gh variable set CLAUDE_MODEL --body <模型 id>`；用网关时 `gh variable set ANTHROPIC_BASE_URL --body <网关地址>`；私有仓库排障时可设 `CLAUDE_SHOW_FULL_OUTPUT=true`
    - 密钥：用户自己 `gh secret set ANTHROPIC_API_KEY`（或改用 OAuth 令牌输入）
 5. **引导合并（只有第一次）**：`ci.yml` 的 `workflow_dispatch` 必须已在默认分支上才能被触发。devloop 自身那个 PR 用 `node scripts/devloop/devloop.mjs review <PR>`：`ci.mjs` 会自动回退到“head 与 base 都吻合的 pull_request CI 运行”。
 6. **本机常驻**：为审核方单独 clone 一份仓库（不要用日常工作的检出），填好 `templates/launchd/devloop.plist.template` 的占位符，放到 `~/Library/LaunchAgents/` 后 `launchctl bootstrap gui/$(id -u) <plist>`。必须设 `DEVLOOP_REPO`；`DEVLOOP_REVIEW_MODEL` 可选。合并后 watch 会自行退出，由 launchd 用最新 main 重启（审核方随之自更新）。
@@ -66,6 +66,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 - 审核结论缓存键 = head + base；base 变了必须重审。
 - 云端失败兜底：Claude 步骤单独设比任务短的超时；打包、上传、`publish` 用 `if: always()`；`publish` 自己失败再用 `if: failure()` 步骤发说明并加 needs-user。
 - 手动重跑（`workflow_dispatch`）成功推送后移除 needs-user，**不动 hold**。
+- `publish` 在 `work` 被**取消**时不要运行：concurrency 队列里被挤掉的旧任务会显示 cancelled，若照常发“失败”说明会误加 needs-user。
 - 并发：本机用**端口独占**做进程锁（进程退出由系统释放，不存在过期锁）；文件锁的“创建 + 写 pid”与过期锁接管都有竞态。工作区目录每次唯一。
 
 **证据**
@@ -82,6 +83,8 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | 私有仓库 CI 取 PR head 失败 | 见“隔离”中的第二个 checkout 做法。 |
 | PR 一直不被审 | 草稿 PR、带 needs-user / hold 标签、该 head 已有终态标记、目标不是 main。 |
 | 用 GITHUB_TOKEN 开的 PR 不触发 `pull_request` CI | GitHub 的设计；本模板由审核方用 `workflow_dispatch` 触发 CI。 |
+| 云端 Claude 跑了很多轮（花了钱）后 `is_error:true` 失败，日志看不出原因 | 多为中途的模型调用偶发错误（网关、限流、过载）。按恢复步骤 `gh workflow run claude.yml -f pr=<N>` 重跑即可。想看具体报错：私有仓库设仓库变量 `CLAUDE_SHOW_FULL_OUTPUT=true`（日志含全部工具输出，secrets 会被打码；公开仓库不要开）。 |
+| PR 上出现“云端执行失败”说明并被加 needs-user，但修复其实在正常进行 | 被 concurrency 取消的重复任务发的。确认 `publish` 的条件排除了 `cancelled`；删掉误导性评论、移除 needs-user。 |
 | 同一提交每个扫描周期都被重复评论 | 审核方认不出自己的标记：多半是 GitHub 账号改名或 `gh` 切换了账号。确认 `gh api user -q .login` 与评论作者一致；先 `launchctl bootout` 停掉审核方，取消重复的修复任务，再清理重复评论。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |
 
