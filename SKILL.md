@@ -66,6 +66,8 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 - 审核结论缓存键 = head + base；base 变了必须重审。
 - 云端失败兜底：Claude 步骤单独设比任务短的超时；打包、上传、`publish` 用 `if: always()`；`publish` 自己失败再用 `if: failure()` 步骤发说明并加 needs-user。
 - 手动重跑（`workflow_dispatch`）成功推送后移除 needs-user，**不动 hold**。
+- 工作流里调用的**命令本身**要被测试真正执行，不能只用正则检查 YAML 里有这行字：把命令移进脚本，用“严格的假 CLI”（不认识的参数直接失败，并加一条自测确认它确实会拒绝无效参数）跑端到端；关键 CLI 的输出格式先用真实命令在真实仓库核对一次（曾写出 `gh api … -c`，`gh api` 并无此参数，功能从未跑通而测试全绿）。
+- 去重 / 已处理判定**要校验作者身份**（如 `github-actions[bot]` 且 type=Bot）加上由流水线确定性写入的标记，不能只看评论的展示文案——用户可以照抄。
 - 工作流 YAML 里的条件（`if:`）也要有测试，而且测试要**读取真实的 YAML** 求值，不能在测试里另抄一份逻辑——否则删掉条件测试照样通过（模板 `claude.test.mjs` 的 `publishRuns` 只支持当前用到的表达式子集，遇到不认识的写法直接失败）。
 - **改工作流文件的 PR 不要交给云端修复**：云端 `publish` 用的 `GITHUB_TOKEN` 没有 workflows 权限，修完也推不上来，白花一次模型费用。审核要求修改时，先给 PR 打 `hold`、取消已触发的云端修复，由有权限的本地会话修复推送后再去掉 `hold`。（更彻底：给 `publish` 一个有 workflows 权限的令牌，由用户决定。）
 - `publish` 在 `work` 被**取消**时不要运行：concurrency 队列里被挤掉的旧任务会显示 cancelled，若照常发“失败”说明会误加 needs-user。
