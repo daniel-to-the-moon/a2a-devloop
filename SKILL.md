@@ -87,7 +87,9 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 
 **固定第三方 Action 版本**
 - 按提交 SHA 固定（`uses: owner/action@<40 位提交 SHA> # vX.Y`）。注意 `gh api repos/<o>/<r>/git/ref/tags/<tag>` 对注释标签返回的是**标签对象**的 SHA，不是提交，Actions 会解析失败；用 `gh api repos/<o>/<r>/commits/<tag> -q .sha` 取提交 SHA。
-- 同一对象的请求会排队的工作流（如点名 AI 回复），`concurrency` 也要加 `queue: max`，否则后来的请求会挤掉尚未处理的那个。
+- 同一对象的请求会排队的工作流（如点名 AI 回复），`concurrency` 也要加 `queue: max`，否则后来的请求会挤掉尚未处理的那个；而且要放在**工作流级**（串行整次运行，含发评论任务），后到的运行才能看到前一次的结果做去重。
+- **带标签新建 issue 会同时产生 `opened` 和每个标签的 `labeled` 事件**：“打上某标签就让 AI 发言”只处理 `labeled`，并在发言前检查是否已有该 AI 的评论，否则一次创建会付费发言两三次。
+- 点名类 AI 回复要把**触发的那条评论（id、正文、链接）**单独交给模型并要求只回答它；全文截断时不截这条。否则两条点名先后排队，都会去回答最新那条，前一条漏答。
 
 ## 四、故障排查
 
@@ -103,6 +105,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | PR 上出现“云端执行失败”说明并被加 needs-user，但修复其实在正常进行 | 被 concurrency 取消的重复任务发的。确认 `publish` 的条件排除了 `cancelled`；删掉误导性评论、移除 needs-user。 |
 | 云端实现成功，但 publish 推送被拒：`refusing to allow a GitHub App to create or update workflow … without workflows permission` | `GITHUB_TOKEN` 不能推送“改动工作流”的提交；work 运行期间默认分支更新了工作流文件时，从旧起点开出的新分支也会被这样判定。模板 `publish.sh` 在新分支模式下先 rebase 到当前默认分支再推。fix 模式若需把默认分支合进 PR 分支且其中有工作流改动，仍会被拒——彻底解决需给 publish 一个有 `workflows` 权限的令牌（用户决定）。已产出的工作可从 Actions 产物 `work.bundle` 取出，由有权限的账号推送开 PR，不必重跑模型。 |
 | GPT（codex-action）用的是第三方网关发的 OpenAI key | codex-action 的 `responses-api-endpoint` 指向网关的 `/v1/responses`（放仓库变量），模型只用网关允许的。先在本机验证：`/v1/models` 应 200，`/v1/responses` 用 `"stream":true` 试一次（有的网关只接受流式）。从账号说明文件里取 key 时只截 `sk-…` 这一段，避免把全角引号等字符带进去（会报 unknown_key）。注意网关限速（如并发 1、每分钟 6 次），评审排队变慢属正常。 |
+| 云端 Claude 秒退，结果里是 `429 … Usage in the last 5 hours has reached 100%` | 模型账号（或网关）的滚动额度用完，和代码无关。等提示的重置时间过后重试：实现阶段（issue）去掉 `needs-user` 与 `devloop` 再重新加 `devloop`；修复阶段（PR）用 `gh workflow run claude.yml -f pr=<N>`。连续排多项开发时拉长间隔。 |
 | 同一提交每个扫描周期都被重复评论 | 审核方认不出自己的标记：多半是 GitHub 账号改名或 `gh` 切换了账号。确认 `gh api user -q .login` 与评论作者一致；先 `launchctl bootout` 停掉审核方，取消重复的修复任务，再清理重复评论。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |
 
