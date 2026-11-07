@@ -85,6 +85,10 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 - 用邮箱验证码登录的访问控制，评审 agent 通常过不去。不要为此放开访问：由本地会话在**同一提交**上本机试玩、按玩家路径截图，做成“体验包” issue（截图、操作路径、当时数值、现状缺口、评审请求），截图提交到不建 PR 的资料分支，用提交号固定的链接引用。
 - 评审意见走 `proposal` 标签：一条建议一个 issue；**只有用户**给它加 `devloop` 才算拍板并触发实现。评审方不能自己打 `devloop`。拍板后的规则与数值写回仓库文档并注明出处 issue。
 
+**固定第三方 Action 版本**
+- 按提交 SHA 固定（`uses: owner/action@<40 位提交 SHA> # vX.Y`）。注意 `gh api repos/<o>/<r>/git/ref/tags/<tag>` 对注释标签返回的是**标签对象**的 SHA，不是提交，Actions 会解析失败；用 `gh api repos/<o>/<r>/commits/<tag> -q .sha` 取提交 SHA。
+- 同一对象的请求会排队的工作流（如点名 AI 回复），`concurrency` 也要加 `queue: max`，否则后来的请求会挤掉尚未处理的那个。
+
 ## 四、故障排查
 
 | 现象 | 原因与处理 |
