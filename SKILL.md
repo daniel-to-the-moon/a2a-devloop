@@ -67,6 +67,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 - 云端失败兜底：Claude 步骤单独设比任务短的超时；打包、上传、`publish` 用 `if: always()`；`publish` 自己失败再用 `if: failure()` 步骤发说明并加 needs-user。
 - 手动重跑（`workflow_dispatch`）成功推送后移除 needs-user，**不动 hold**。
 - 工作流 YAML 里的条件（`if:`）也要有测试，而且测试要**读取真实的 YAML** 求值，不能在测试里另抄一份逻辑——否则删掉条件测试照样通过（模板 `claude.test.mjs` 的 `publishRuns` 只支持当前用到的表达式子集，遇到不认识的写法直接失败）。
+- **改工作流文件的 PR 不要交给云端修复**：云端 `publish` 用的 `GITHUB_TOKEN` 没有 workflows 权限，修完也推不上来，白花一次模型费用。审核要求修改时，先给 PR 打 `hold`、取消已触发的云端修复，由有权限的本地会话修复推送后再去掉 `hold`。（更彻底：给 `publish` 一个有 workflows 权限的令牌，由用户决定。）
 - `publish` 在 `work` 被**取消**时不要运行：concurrency 队列里被挤掉的旧任务会显示 cancelled，若照常发“失败”说明会误加 needs-user。
 - 并发：本机用**端口独占**做进程锁（进程退出由系统释放，不存在过期锁）；文件锁的“创建 + 写 pid”与过期锁接管都有竞态。工作区目录每次唯一。
 
