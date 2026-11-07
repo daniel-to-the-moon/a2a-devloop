@@ -88,7 +88,17 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | 同一提交每个扫描周期都被重复评论 | 审核方认不出自己的标记：多半是 GitHub 账号改名或 `gh` 切换了账号。确认 `gh api user -q .login` 与评论作者一致；先 `launchctl bootout` 停掉审核方，取消重复的修复任务，再清理重复评论。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |
 
-## 五、交付时告诉用户
+## 五、轮次用满后的人工裁决
+
+PR 达到轮次上限被打 `needs-user` 时，把剩余问题按严重度和影响面（例如“仅开发模式可达”）整理给用户，给三个选项：再给一轮修复（`gh workflow run claude.yml -f pr=<N>`）、先合并并把剩余问题转成带 `devloop` 标签的 issue、先放着。经验：问题数逐轮收敛、剩余问题影响面很窄时，用户多半选先合并。
+
+用户选“先合并”时，**仍用流水线同样的原子方式合并**，不要点 GitHub 的合并按钮：
+1. 确认默认分支仍等于最后一轮 CI 测试的 base（审核评论里的签名标记 `base=` 与 CI 链接）；不等就先重跑 CI。
+2. 用 `gitops.mjs` 的 `mergeAndPush({ base, head, branch, message })`：在 base 上 `merge --no-ff` 后普通推送；提交信息写明用户裁决与 CI 链接。
+3. 剩余问题逐条开 issue（现象、验收标准、影响范围），打 `devloop` 标签交给循环；在原 PR 下留言链接这些 issue 并移除 `needs-user`。
+4. 其他审核中的 PR 会因默认分支变化记为 `retry`，下一轮自动用新基准重审，这是预期行为。
+
+## 六、交付时告诉用户
 
 - 怎么用：给 issue 打 `devloop` 标签；PR 卡住看 `needs-user`；暂停某 PR 打 `hold`；停掉本机审核 `launchctl bootout gui/$(id -u)/<label>`；日志在 `<HOME_DIR>/watch.log`。
 - 仍归用户的决定：托管、收费 / 广告 / 公开上线、分支保护、给模型 key 设上限、首次运行后的实际费用。
