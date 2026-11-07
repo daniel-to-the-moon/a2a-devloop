@@ -59,6 +59,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 **状态机与防卡死**
 - 评论标记带 **HMAC 签名**（密钥只在审核方本机），只认审核方账号、固定前缀的评论，每条只认最后一个标记；否则任何人写一行注释就能让流程跳过或提前停止。
 - 状态：`changes`（触发修复，该 head 不再审）、`merged`、`stopped`（加 needs-user）、`retry`（下一轮再试）。
+- 审核方账号**每次重新查询**，不要在启动时缓存：GitHub 账号改名后历史评论也显示新用户名，缓存旧名会认不出自己的标记、对同一提交每轮重复评论并重复触发修复。
 - 暂停标签判断**先于**“需修改”，否则审核中途加 hold 会写入终态、去掉 hold 后永远不再审。
 - 两个上限：同一 PR 5 轮未过；同一 head 3 次基础设施问题（CI 没跑完、查询出错、GPT 审核本身失败）。CI 的 `timed_out` 算测试失败，交给执行者修。
 - CI 轮询里的**任何异常**都转成 `status=error`，不能向外抛（否则绕过重试上限无限重试）。
@@ -81,6 +82,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | 私有仓库 CI 取 PR head 失败 | 见“隔离”中的第二个 checkout 做法。 |
 | PR 一直不被审 | 草稿 PR、带 needs-user / hold 标签、该 head 已有终态标记、目标不是 main。 |
 | 用 GITHUB_TOKEN 开的 PR 不触发 `pull_request` CI | GitHub 的设计；本模板由审核方用 `workflow_dispatch` 触发 CI。 |
+| 同一提交每个扫描周期都被重复评论 | 审核方认不出自己的标记：多半是 GitHub 账号改名或 `gh` 切换了账号。确认 `gh api user -q .login` 与评论作者一致；先 `launchctl bootout` 停掉审核方，取消重复的修复任务，再清理重复评论。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |
 
 ## 五、交付时告诉用户
