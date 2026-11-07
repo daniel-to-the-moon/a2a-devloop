@@ -15,7 +15,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 卡住    → needs-user 标签 + 失败说明，等人
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 34 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 35 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 一、先和用户确认（这些是用户的决定，不要替他选）
 
@@ -66,6 +66,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 - 审核结论缓存键 = head + base；base 变了必须重审。
 - 云端失败兜底：Claude 步骤单独设比任务短的超时；打包、上传、`publish` 用 `if: always()`；`publish` 自己失败再用 `if: failure()` 步骤发说明并加 needs-user。
 - 手动重跑（`workflow_dispatch`）成功推送后移除 needs-user，**不动 hold**。
+- 工作流 YAML 里的条件（`if:`）也要有测试，而且测试要**读取真实的 YAML** 求值，不能在测试里另抄一份逻辑——否则删掉条件测试照样通过（模板 `claude.test.mjs` 的 `publishRuns` 只支持当前用到的表达式子集，遇到不认识的写法直接失败）。
 - `publish` 在 `work` 被**取消**时不要运行：concurrency 队列里被挤掉的旧任务会显示 cancelled，若照常发“失败”说明会误加 needs-user。
 - 并发：本机用**端口独占**做进程锁（进程退出由系统释放，不存在过期锁）；文件锁的“创建 + 写 pid”与过期锁接管都有竞态。工作区目录每次唯一。
 

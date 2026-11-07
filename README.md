@@ -30,7 +30,7 @@ git clone <本仓库地址> ~/.claude/skills/a2a-devloop
 ## 内容
 
 - `SKILL.md`：skill 本体
-- `templates/`：完整实现（两个 GitHub Actions 工作流、审核方脚本、launchd 模板、流程文档），Node 内置模块、无依赖；`node --test templates/scripts/devloop/*.test.mjs` 共 34 项测试
+- `templates/`：完整实现（两个 GitHub Actions 工作流、审核方脚本、launchd 模板、流程文档），Node 内置模块、无依赖；`node --test templates/scripts/devloop/*.test.mjs` 共 35 项测试
 
 ## 前置条件
 

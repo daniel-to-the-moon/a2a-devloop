@@ -122,6 +122,39 @@ test('publish：outcome 为 needs-user 或产物缺失 → 评论 + 加 needs-us
   }
 });
 
+/**
+ * 读取 claude.yml 里 publish 任务的真实 `if:` 条件，按 GitHub 表达式语义对给定的 work 结果求值。
+ * 只支持当前用到的子集（`&&` 连接的 always()/success()/failure()/cancelled() 与 `needs.work.result ==/!= '值'`）；
+ * 遇到不认识的写法直接抛错，让测试失败，而不是默默算错。
+ */
+function publishRuns(workResult) {
+  const yml = readFileSync(join(HERE, '../../.github/workflows/claude.yml'), 'utf8');
+  const job = yml.match(/^  publish:\n((?:(?: {4,}.*)?\n)*)/m);
+  assert.ok(job, 'claude.yml 里找不到 publish 任务');
+  const m = job[1].match(/^ {4}if: *(.+)$/m);
+  assert.ok(m && !/^[>|]/.test(m[1]), 'publish 的 if 应为单行表达式');
+  const expr = m[1].replace(/^\$\{\{\s*|\s*\}\}$/g, '').trim();
+  if (/\|\||[()]/.test(expr.replace(/\w+\(\)/g, ''))) throw new Error(`不支持的表达式：${expr}`);
+  // 依赖任务结果对状态函数的影响（单一依赖 work）
+  const status = { 'always()': true, 'success()': workResult === 'success', 'failure()': workResult === 'failure', 'cancelled()': false };
+  let hasStatusFn = false;
+  const ok = expr.split('&&').map((s) => s.trim()).every((term) => {
+    if (term in status) { hasStatusFn = true; return status[term]; }
+    const c = term.match(/^needs\.work\.result *(==|!=) *'([a-z]+)'$/);
+    if (!c) throw new Error(`不支持的条件项：${term}`);
+    return c[1] === '==' ? workResult === c[2] : workResult !== c[2];
+  });
+  // 没写状态函数时 GitHub 隐含 success()
+  return ok && (hasStatusFn || workResult === 'success');
+}
+
+test('claude.yml：work 成功或失败才运行 publish；被取消或跳过不运行（防误报失败、误加 needs-user）', () => {
+  assert.equal(publishRuns('success'), true);
+  assert.equal(publishRuns('failure'), true);
+  assert.equal(publishRuns('cancelled'), false);
+  assert.equal(publishRuns('skipped'), false);
+});
+
 test('publish：拒绝推送到非 claude/* 分支；分支已被别人更新（非快进）时失败、不覆盖', () => {
   const bad = publishSetup({ branch: 'main' });
   assert.notEqual(bad.run({ MODE: 'fix', EVENT: 'issue_comment' }).status, 0);
