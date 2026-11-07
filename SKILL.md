@@ -78,7 +78,8 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 **发布到对外地址（可选）**
 - 部署任务用 `concurrency` 串行时，**加 `queue: max`**：默认只保留一个等待中的任务，新到的会挤掉排队中的最新发布；排队顺序不保证，上传前再核对提交仍是默认分支最新、过期运行跳过。
 - 内部验收环境要在“上传前”自证受保护：用未登录请求访问正式地址和一个预览地址，必须拿到**访问控制本身的确证**才放行，否则拒绝上传。以 Cloudflare Access 为例，只认 3xx 且 Location 严格匹配 `^https://<团队>.cloudflareaccess.com/cdn-cgi/access/login([/?]|$)`（协议、主机后缀、路径逐项校验，不能做子串匹配）；**普通 401/403 不算**——反机器人机制（如 Browser Integrity Check）也会对 CI 返回 403，而浏览器仍能直接访问。先配访问控制、再开上传开关；开关默认关闭。
-- Cloudflare Pages + Access 的配置顺序以官方“已知问题”页为准：Pages 设置里启用 access policy → 管理生成的应用、删掉通配符以保护正式地址 → 再次启用以保护预览地址 → 无痕窗口验证两类地址。
+- Cloudflare Pages + Access（新版后台实测）：Pages 项目设置里启用 **Preview access** 会自动生成一个 Access 应用（只覆盖 `*.<项目>.pages.dev`，规则为“账户成员”）。**不开通 Zero Trust 套餐也能用**。保护正式地址：进入该应用 → Edit → Destinations 里**保留**通配符那行、再加一行子域留空的 `<项目>.pages.dev` → 保存（官方旧文档的“删通配符再重新启用”是旧界面做法）。之后用未登录请求验证两类地址都 302 到 `https://<团队>.cloudflareaccess.com/cdn-cgi/access/login/…`。注意：规则放行的是账户成员，以后邀请他人加入 Cloudflare 账户即获得访问权。
+- 上传开关打开后不必等下一次合并：重跑最近一次默认分支 CI 的发布任务即可（`gh run rerun <run> --job <job>`），前提是该提交仍是默认分支最新。发布后再次用未登录请求确认正式与本次预览地址都仍被拦截。
 
 ## 四、故障排查
 
