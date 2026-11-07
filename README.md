@@ -37,3 +37,7 @@ git clone <本仓库地址> ~/.claude/skills/a2a-devloop
 - GitHub 仓库与已登录的 `gh` CLI
 - 云端 Claude 的凭据：Anthropic API key、`claude setup-token` 的 OAuth 令牌，或兼容 Anthropic API 的网关 key + 网关地址
 - 审核方：Codex CLI（ChatGPT 订阅即可）+ Node ≥ 22；本机常驻示例为 macOS launchd
+
+## 许可证
+
+[MIT](LICENSE)
