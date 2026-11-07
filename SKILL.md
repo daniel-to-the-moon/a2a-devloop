@@ -15,7 +15,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 卡住    → needs-user 标签 + 失败说明，等人
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 35 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 36 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 一、先和用户确认（这些是用户的决定，不要替他选）
 
@@ -86,6 +86,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | 用 GITHUB_TOKEN 开的 PR 不触发 `pull_request` CI | GitHub 的设计；本模板由审核方用 `workflow_dispatch` 触发 CI。 |
 | 云端 Claude 跑了很多轮（花了钱）后 `is_error:true` 失败，日志看不出原因 | 多为中途的模型调用偶发错误（网关、限流、过载）。按恢复步骤 `gh workflow run claude.yml -f pr=<N>` 重跑即可。想看具体报错：私有仓库设仓库变量 `CLAUDE_SHOW_FULL_OUTPUT=true`（日志含全部工具输出，secrets 会被打码；公开仓库不要开）。 |
 | PR 上出现“云端执行失败”说明并被加 needs-user，但修复其实在正常进行 | 被 concurrency 取消的重复任务发的。确认 `publish` 的条件排除了 `cancelled`；删掉误导性评论、移除 needs-user。 |
+| 云端实现成功，但 publish 推送被拒：`refusing to allow a GitHub App to create or update workflow … without workflows permission` | `GITHUB_TOKEN` 不能推送“改动工作流”的提交；work 运行期间默认分支更新了工作流文件时，从旧起点开出的新分支也会被这样判定。模板 `publish.sh` 在新分支模式下先 rebase 到当前默认分支再推。fix 模式若需把默认分支合进 PR 分支且其中有工作流改动，仍会被拒——彻底解决需给 publish 一个有 `workflows` 权限的令牌（用户决定）。已产出的工作可从 Actions 产物 `work.bundle` 取出，由有权限的账号推送开 PR，不必重跑模型。 |
 | 同一提交每个扫描周期都被重复评论 | 审核方认不出自己的标记：多半是 GitHub 账号改名或 `gh` 切换了账号。确认 `gh api user -q .login` 与评论作者一致；先 `launchctl bootout` 停掉审核方，取消重复的修复任务，再清理重复评论。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |
 

@@ -26,6 +26,19 @@ git bundle verify -q "$OUT/work.bundle"
 git fetch -q "$OUT/work.bundle" HEAD
 new=$(git rev-parse FETCH_HEAD)
 git merge-base --is-ancestor "$START" "$new" || { echo "::error::新提交不是从起点延伸的" >&2; exit 1; }
+if [ "$MODE" != "fix" ]; then
+  # 新分支：把新提交挪到当前 main 上再推。若 work 运行期间 main 更新了工作流文件，从旧起点开出的新分支
+  # 在 GitHub 看来等于“改动工作流”，GITHUB_TOKEN 无此权限会被拒。
+  # 纯 git 操作，不执行仓库代码；有冲突则失败，由 failure() 步骤报告并加 needs-user。
+  git fetch -q origin main
+  main=$(git rev-parse FETCH_HEAD)
+  if [ "$main" != "$START" ]; then
+    git checkout -q --detach "$new"
+    git -c user.name=claude-devloop -c user.email=claude-devloop@users.noreply.github.com rebase -q --onto "$main" "$START" \
+      || { git rebase --abort 2>/dev/null || true; echo "::error::新提交无法干净地挪到当前 main 上（有冲突）" >&2; exit 1; }
+    new=$(git rev-parse HEAD)
+  fi
+fi
 # 普通推送：分支在此期间被别人更新（非快进）则失败，不覆盖
 git push -q origin "$new:refs/heads/$BRANCH"
 if [ "$MODE" = "fix" ]; then

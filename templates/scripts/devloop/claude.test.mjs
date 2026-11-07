@@ -112,6 +112,35 @@ test('publish：implement 推送并开 PR，编号与分支正确传递', () => 
   assert.match(t.gh.log(), /^pr create -R o\/r --base main --head claude\/issue-4 --title 标题/m);
 });
 
+test('publish：新分支开出前 main 已更新（含工作流改动）→ 先挪到当前 main 上再推；有冲突则失败且不推送', () => {
+  const t = publishSetup({ branch: 'claude/issue-7' });
+  // work 运行期间 main 前进了一个改工作流的提交
+  const other = join(root, `main-${n++}`);
+  execFileSync('git', ['clone', '-q', '-b', 'main', t.remote, other]);
+  mkdirSync(join(other, '.github', 'workflows'), { recursive: true });
+  writeFileSync(join(other, '.github', 'workflows', 'x.yml'), 'on: push');
+  execFileSync('git', ['-C', other, 'add', '.']);
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'wf'], { cwd: other });
+  execFileSync('git', ['push', '-q', 'origin', 'main'], { cwd: other });
+  const main = t.ref('refs/heads/main');
+  const r = t.run({ MODE: 'implement', EVENT: 'issues' });
+  assert.equal(r.status, 0, r.stderr);
+  const tip = t.ref('refs/heads/claude/issue-7');
+  assert.equal(t.ref(`${tip}^`), main); // 新提交的父提交是当前 main
+  assert.equal(execFileSync('git', ['diff', '--name-only', main, tip], { cwd: t.remote, encoding: 'utf8' }).trim(), 'b'); // 只带新提交自己的改动
+
+  // 冲突：main 改了同一个文件
+  const c = publishSetup({ branch: 'claude/issue-8' });
+  const o2 = join(root, `main-${n++}`);
+  execFileSync('git', ['clone', '-q', '-b', 'main', c.remote, o2]);
+  writeFileSync(join(o2, 'b'), 'conflict');
+  execFileSync('git', ['-C', o2, 'add', 'b']);
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'c'], { cwd: o2 });
+  execFileSync('git', ['push', '-q', 'origin', 'main'], { cwd: o2 });
+  assert.notEqual(c.run({ MODE: 'implement', EVENT: 'issues' }).status, 0);
+  assert.equal(c.ref('refs/heads/claude/issue-8'), c.start); // 未推送
+});
+
 test('publish：outcome 为 needs-user 或产物缺失 → 评论 + 加 needs-user，不推送', () => {
   for (const outcome of ['needs-user', null]) {
     const t = publishSetup({ outcome, withBundle: false });
