@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 占位符：{{LABEL}} 如 com.example.devloop；{{CLONE}} 审核方专用克隆的绝对路径；{{HOME_DIR}} 工作目录（锁、缓存、日志、签名密钥）；
+     {{NODE_BIN}} 含 node、gh、codex 的目录；{{REPO}} owner/name -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{{LABEL}}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>cd {{CLONE}} &amp;&amp; git fetch -q origin &amp;&amp; git checkout -q -B main origin/main &amp;&amp; exec node scripts/devloop/devloop.mjs watch 300</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>{{NODE_BIN}}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>DEVLOOP_HOME</key><string>{{HOME_DIR}}</string>
+    <key>DEVLOOP_REPO</key><string>{{REPO}}</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>60</integer>
+  <key>StandardOutPath</key><string>{{HOME_DIR}}/watch.log</string>
+  <key>StandardErrorPath</key><string>{{HOME_DIR}}/watch.log</string>
+</dict>
+</plist>

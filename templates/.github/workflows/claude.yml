@@ -1,0 +1,206 @@
+# devloop 云端执行者：Claude（docs/DEVLOOP.md）
+# - issue 打上 devloop 标签 → Claude 实现，开 PR
+# - GPT 审核评论带 state=changes 标记 → Claude 在同一 PR 分支上修复
+#
+# 安全结构：执行代码的任务与有写权限的任务分开。
+#   work    ：只读令牌。Claude 在这里改代码、跑 npm / 测试，只在本地提交，最后打成 git bundle 上传。
+#   publish ：有写权限，但不检出、不执行任何仓库代码；只把 bundle 里的提交推到 claude/* 分支，并开 PR 或评论。
+# 依赖或测试脚本即使被污染，也拿不到能写仓库的令牌。（work 任务里仍有模型 API key，建议设用量上限。）
+# 审核与合并不在这里，由用户 Mac 上的审核方完成。
+name: claude
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  # 手动重跑某个 PR 的修复（例如云端故障排除后）。只有有写权限的人能触发
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: '要修复的 PR 编号（按其最新一条 GPT 审核评论修复）'
+        required: true
+
+permissions: {}
+
+jobs:
+  work:
+    if: >-
+      (github.event_name == 'issues' &&
+       github.event.label.name == 'devloop' &&
+       !contains(github.event.issue.labels.*.name, 'needs-user')) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       github.event.comment.user.login == github.repository_owner &&
+       startsWith(github.event.comment.body, '执行者：GPT') &&
+       contains(github.event.comment.body, ' state=changes:') &&
+       !contains(github.event.issue.labels.*.name, 'needs-user') &&
+       !contains(github.event.issue.labels.*.name, 'hold')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: claude-${{ github.event.issue.number || inputs.pr }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+    outputs:
+      mode: ${{ steps.ctx.outputs.mode }}
+      branch: ${{ steps.ctx.outputs.branch }}
+      start: ${{ steps.start.outputs.start }}
+    steps:
+      # 判断逻辑在 scripts/devloop/ctx.sh（有测试）；取 main 上的版本（可信），不用 PR 里的
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: _devloop
+          sparse-checkout: scripts/devloop
+          persist-credentials: false
+      - name: 确定模式与分支
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N: ${{ github.event.issue.number || inputs.pr }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+        run: bash _devloop/scripts/devloop/ctx.sh
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ctx.outputs.mode == 'fix' && steps.ctx.outputs.branch || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 记录起点
+        id: start
+        run: |
+          echo "start=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git config user.name "claude-devloop[bot]"
+          git config user.email "claude-devloop@users.noreply.github.com"
+          mkdir -p "$RUNNER_TEMP/devloop"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: anthropics/claude-code-action@v1
+        id: claude
+        # 比任务超时短：Claude 超时只让这一步失败，后面的打包与发布照常运行
+        timeout-minutes: 75
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ runner.temp }}/devloop
+          # 模型网关（可选仓库变量）：key 来自兼容 Anthropic API 的网关时设置；为空时走官方地址
+          ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          prompt: |
+            你是本仓库的代码执行者 Claude（devloop 循环，见 docs/DEVLOOP.md）。
+            本任务的 GitHub 令牌是只读的：你不能也不需要推送、开 PR 或评论。改完后只在本地 git commit，发布由后续任务完成。
+            结果写到环境变量 OUT 指向的目录：
+              - $OUT/outcome：一行，`pr`（有代码提交）或 `needs-user`（不动手）
+              - $OUT/title.txt：PR 标题（implement 模式且 outcome 为 pr 时）
+              - $OUT/body.md：PR 描述，或给 issue / PR 的评论正文；开头写“执行者：Claude（devloop）”
+
+            模式：${{ steps.ctx.outputs.mode }}；编号：#${{ github.event.issue.number || inputs.pr }}；已检出分支：${{ steps.ctx.outputs.mode == 'fix' && steps.ctx.outputs.branch || 'main' }}
+
+            通用要求：
+            - 先读 {{PROJECT_RULES}}、docs/DEVLOOP.md。遵守项目硬边界；新增数值或事实主张注明“提案 / 待核实”或给出推演 / 来源。
+            - 提交前必须通过：有 package.json 时 `npm ci --no-audit --no-fund && npm test && npm run build`；
+              改了 scripts/devloop 时 `node --test scripts/devloop/*.test.mjs`；纯文档改动不需要 npm。不通过就继续修，不要提交失败的代码。
+            - 不要合并、不要审核自己的改动。
+
+            implement 模式：用 `gh issue view ${{ github.event.issue.number || inputs.pr }} --comments` 读 issue。
+              命中 docs/DEVLOOP.md 第五节任一停止条件或信息不足 → outcome 写 needs-user，body.md 写原因，不改代码。
+              否则实现需求并为新增或改动的逻辑写测试，本地 commit；body.md 写明改了什么、怎么验证、哪些是提案值，末尾 `Closes #${{ github.event.issue.number || inputs.pr }}`。
+
+            fix 模式：用 `gh pr view ${{ github.event.issue.number || inputs.pr }} --comments` 读 PR，以最新一条“执行者：GPT”评论为准。
+              逐条处理 blocker 与 major；minor 合理就改；不同意的给出依据，不要静默忽略。
+              测试失败时用评论里 Actions 链接的运行号执行 `gh run view <运行号> --log-failed` 看日志；冲突时 `git merge origin/main` 解决。
+              本地 commit；body.md 逐条列出每个意见的处理结果。
+          claude_args: |
+            --model ${{ vars.CLAUDE_MODEL }}
+            --max-turns 120
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(gh:*),Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(ls:*),Bash(cat:*),Bash(mkdir:*),Bash(echo:*)"
+      - name: 打包新提交（前面任一步失败也运行，失败时产出 needs-user 说明）
+        if: always()
+        env:
+          OUT: ${{ runner.temp }}/devloop
+          START: ${{ steps.start.outputs.start }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$OUT"
+          if [ "$CLAUDE_OUTCOME" != "success" ]; then
+            # Claude 这一步失败、超时或没运行：不发布任何代码，只报告
+            printf '执行者：Claude（devloop）\n\n云端执行没有正常完成（Claude 步骤结果：%s），自动循环在此停下，请用户查看：%s\n' "${CLAUDE_OUTCOME:-未运行}" "$RUN_URL" > "$OUT/body.md"
+            echo needs-user > "$OUT/outcome"
+            exit 0
+          fi
+          test -f "$OUT/outcome" || echo needs-user > "$OUT/outcome"
+          test -f "$OUT/body.md" || printf '执行者：Claude（devloop）\n\n本次运行没有产出说明，请看 Actions 日志：%s\n' "$RUN_URL" > "$OUT/body.md"
+          if [ "$(tr -d '[:space:]' < "$OUT/outcome")" = "pr" ] && [ -n "$START" ] && [ "$(git rev-parse HEAD)" != "$START" ]; then
+            git bundle create "$OUT/work.bundle" "$START..HEAD" HEAD
+            echo pr > "$OUT/outcome"
+          else
+            echo needs-user > "$OUT/outcome"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: devloop-${{ github.run_id }}
+          path: ${{ runner.temp }}/devloop
+          retention-days: 7
+
+  publish:
+    needs: work
+    # work 失败或超时也运行：把失败说明发出去并加 needs-user，循环不会无声卡住
+    if: always() && needs.work.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: devloop-${{ github.run_id }}
+          path: out
+      # 发布逻辑在 scripts/devloop/publish.sh（有测试），取 main 上的版本（可信）；不检出、不执行 PR 里的任何代码
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: _devloop
+          sparse-checkout: scripts/devloop
+          persist-credentials: false
+      - name: 推送分支并开 PR 或评论
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          N: ${{ github.event.issue.number || inputs.pr }}
+          MODE: ${{ needs.work.outputs.mode }}
+          BRANCH: ${{ needs.work.outputs.branch }}
+          START: ${{ needs.work.outputs.start }}
+          EVENT: ${{ github.event_name }}
+          OUT: ${{ github.workspace }}/out
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          export PUSH_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          bash _devloop/scripts/devloop/publish.sh
+      # 上一步任何命令失败（推送被拒、开 PR 失败、评论失败……）：发失败说明并加 needs-user，循环不会无声停滞
+      #。这里同样不执行仓库代码。
+      - name: 发布失败时报告
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          N: ${{ github.event.issue.number || inputs.pr }}
+          BRANCH: ${{ needs.work.outputs.branch }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf '执行者：Claude（devloop）\n\n发布步骤失败（分支：%s）。可能是推送被拒（分支在此期间被更新）或开 PR / 评论失败。自动循环在此停下，请用户查看：%s\n' "${BRANCH:-未知}" "$RUN_URL" > report.md
+          gh issue comment "$N" -R "$REPO" --body-file report.md || true
+          gh issue edit "$N" -R "$REPO" --add-label needs-user || true

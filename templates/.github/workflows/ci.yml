@@ -1,0 +1,76 @@
+# 测试与构建。PR 代码只在 GitHub 托管的一次性 runner 上执行，不在用户机器上执行。
+# - workflow_dispatch：devloop 审核方触发。把 PR 头部提交合并到指定 main 提交上再测，
+#   保证测试的就是“合并后的代码”；并核对 head / base 与审核方给的完全一致。
+# - pull_request：人工推送的 PR（GITHUB_TOKEN 开的 PR 不会触发，靠上面的 dispatch）。
+# - push main：测试 + 构建，并把 dist 上传为发布产物（Actions artifact）。
+name: ci
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('devloop {0} PR#{1}', inputs.nonce, inputs.pr) || format('ci {0}', github.event_name) }}
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr: { description: 'PR 编号', required: true }
+      head: { description: '要测试的 PR 头部提交（完整 SHA）', required: true }
+      base: { description: '要合并到的 main 提交（完整 SHA）', required: true }
+      nonce: { description: '审核方用来找回本次运行的随机串', required: true }
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.base || '' }}
+          fetch-depth: 0
+          persist-credentials: false
+      # 私有仓库拉 PR 头部需要认证：用第二个 checkout（同样不保留凭据）取到子目录，再从本地目录 fetch，
+      # 这样后续执行 PR 代码的步骤里不存在任何令牌
+      - name: 取 PR 头部（仅 devloop 触发）
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ inputs.pr }}/head
+          path: _devloop_pr
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 合并 PR 头部到指定 main（仅 devloop 触发）
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          HEAD_SHA: ${{ inputs.head }}
+          BASE_SHA: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$BASE_SHA" || { echo "::error::main 提交与预期不符"; exit 1; }
+          test "$(git -C _devloop_pr rev-parse HEAD)" = "$HEAD_SHA" || { echo "::error::PR 头部已变化"; exit 1; }
+          git fetch -q ./_devloop_pr "$HEAD_SHA"
+          rm -rf _devloop_pr
+          git -c user.name=ci -c user.email=ci@localhost merge --no-ff --no-edit "$HEAD_SHA" \
+            || { echo "::error::与 main 冲突"; exit 1; }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: devloop 脚本自测
+        run: if [ -d scripts/devloop ]; then node --test scripts/devloop/*.test.mjs; else echo "无 devloop 脚本，跳过"; fi
+      - name: 是否有应用代码
+        id: app
+        run: if [ -f package.json ]; then echo "yes=1" >> "$GITHUB_OUTPUT"; else echo "无 package.json，跳过 npm 步骤"; fi
+      - if: steps.app.outputs.yes == '1'
+        run: npm ci --no-audit --no-fund
+      - if: steps.app.outputs.yes == '1'
+        run: npm test
+      - if: steps.app.outputs.yes == '1'
+        run: npm run build
+      - name: 上传发布产物（main）
+        if: github.event_name == 'push' && steps.app.outputs.yes == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.sha }}
+          path: dist
+          retention-days: 90
