@@ -110,6 +110,9 @@ jobs:
           ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
         with:
           path_to_bun_executable: ${{ steps.bun.outputs.path }}
+          # 云端审核方用 GITHUB_TOKEN 手动触发本工作流时发起者是 github-actions 机器人，action 默认拒绝非人类发起。
+          # 只对手动触发放行；打标签、评论仍只认人类。
+          allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions' || '' }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
           # 完整输出（可选，仓库变量 CLAUDE_SHOW_FULL_OUTPUT=true 开启）：失败时日志里能看到实际报错。

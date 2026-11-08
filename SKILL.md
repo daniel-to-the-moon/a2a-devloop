@@ -148,6 +148,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | 云端 Claude 没启动，日志里 `Install Bun` 报 `Unexpected HTTP response: 504`，随后 `bun: command not found` | claude-code-action 内置的 setup-bun 从 GitHub 下载 Bun 失败（外部故障，可能连续数小时）。模板已改为在 action 之前运行 `scripts/devloop/install-bun.sh`（从 npm 装同版本、退避重试、装出的 bun 能运行才输出路径），路径经 `path_to_bun_executable` 交给 action。注意：工作区根目录的 `actions/checkout` 会**清空根目录**（包括先检出到子目录的可信脚本），所以要在根目录检出之前把脚本复制到 `$RUNNER_TEMP`。 |
 | 云端定时审核（`schedule`）几个小时都不触发，手动 `workflow_dispatch` 正常 | GitHub 定时任务不保证准时，新加的定时可能长时间不跑。不要只靠定时：发布修复后由 `publish` 用 `gh workflow run <审核工作流>` 主动触发（`GITHUB_TOKEN` 触发 `workflow_dispatch` 是允许的），定时只作兜底。 |
 | shell 脚本里 `$FILES` 列表只被当成一个参数（`git diff -- $FILES` 输出为空） | zsh 默认不对未加引号的变量分词。用数组，或在 `bash -c` 里执行。 |
+| 云端审核退回后自动触发的 Claude 修复立即失败：`Workflow initiated by non-human actor: github-actions (type: Bot)` | 由 `GITHUB_TOKEN` 发起的 `workflow_dispatch`，发起者是 github-actions 机器人，claude-code-action 默认拒绝。在 `claude.yml` 设 `allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions' \|\| '' }}`：只对手动触发放行，打标签、评论仍只认人类。不要用 `'*'`。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |
 
 ## 五、轮次用满后的处理
