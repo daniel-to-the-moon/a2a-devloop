@@ -15,7 +15,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 卡住    → needs-user 标签 + 失败说明，等人
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 36 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 52 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 一、先和用户确认（这些是用户的决定，不要替他选）
 
@@ -42,6 +42,21 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 5. **引导合并（只有第一次）**：`ci.yml` 的 `workflow_dispatch` 必须已在默认分支上才能被触发。devloop 自身那个 PR 用 `node scripts/devloop/devloop.mjs review <PR>`：`ci.mjs` 会自动回退到“head 与 base 都吻合的 pull_request CI 运行”。
 6. **本机常驻**：为审核方单独 clone 一份仓库（不要用日常工作的检出），填好 `templates/launchd/devloop.plist.template` 的占位符，放到 `~/Library/LaunchAgents/` 后 `launchctl bootstrap gui/$(id -u) <plist>`。必须设 `DEVLOOP_REPO`；`DEVLOOP_REVIEW_MODEL` 可选。合并后 watch 会自行退出，由 launchd 用最新 main 重启（审核方随之自更新）。
 7. **端到端验证**：开一个小 issue 打上 `devloop`，看完整走一圈：云端 Claude 开 PR → 本机审核评论 → 修复或合并。
+
+## 二·五、可选：GPT 云端参与讨论（discussion / proposal issue）
+
+适用：讨论类 issue 没人回应、希望 GPT 按证据规则自动评审。需要 OpenAI API key（官方或兼容 Responses API 的网关），不需要用户的电脑在线。
+
+1. 复制 `templates/.github/workflows/gpt-discuss.yml` 与 `templates/scripts/devloop/discuss-{gate,build}.mjs`、`discuss-fetch.sh`、`discuss-prompt.md` 及对应测试；替换 `discuss-prompt.md` 里的 `{{PROJECT_RULES}}`、`{{EXTRA_DOCS}}`、`{{FORBIDDEN_PATHS}}`。
+2. 标签：`gh label create discussion`、`gh label create proposal`。
+3. 凭据：用户自己 `gh secret set OPENAI_API_KEY`；用网关时 `gh variable set GPT_RESPONSES_ENDPOINT --body <网关>/v1/responses`；`gh variable set GPT_MODEL --body <模型 id>`（网关只允许特定模型时必填）。
+4. 行为：
+   - issue 被打上 `discussion` / `proposal` → 首次评审一次（带标签新建也算，同一 issue 只评审一次）；
+   - 之后在评论里写 `@gpt` → 只回答那条评论；其他评论不触发，控制费用；
+   - 手动：`gh workflow run gpt-discuss.yml -f issue=<编号>`。
+5. 安全结构：评审任务只读令牌、codex-action 以 `:read-only` 运行、讨论内容视为数据；发评论任务只有 `issues: write`、不跑模型；整次运行按 issue 串行（`queue: max`）；“已评审”只认 `github-actions[bot]` 发出且带 `<!-- gpt-discuss:review … -->` 标记的评论。
+6. 上线验证：合并后给一个已有讨论 issue 打上 `discussion`，确认只出现一条 GPT 评论、末尾带标记；再在评论里 `@gpt` 问一个具体问题，确认它回答的是那条。
+7. 这个工作流改的是 `.github/workflows/`，审核要求修改时云端 Claude 推不上来（见设计要点），由本地会话修复。
 
 ## 三、设计要点（每一条都是真实审核里被打回过的）
 

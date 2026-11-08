@@ -57,6 +57,12 @@ Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费
 
 标记 `state:reason`：`changes`（触发修复，该提交不再审）、`merged`、`stopped`、`retry`（下一轮重试）。HMAC 签名，密钥只在审核方本机；只认审核方账号、以“执行者：GPT”开头的评论，每条只认最后一个标记。只处理“打开、非草稿、目标 main”的 PR。
 
+## 讨论与 GPT 云端评审（可选）
+
+- 讨论 issue 打上 `discussion` / `proposal` 标签时，`gpt-discuss.yml` 让 GPT 按证据规则评审一次；之后评论里写 `@gpt` 再回答那条评论。
+- 需要 secret `OPENAI_API_KEY`；用网关时设变量 `GPT_RESPONSES_ENDPOINT`、`GPT_MODEL`。
+- GPT 只评审与提问，不拍板；用户给 `proposal` 加 `devloop` 即同意实现。
+
 ## 六、恢复
 
 1. 看 PR / issue 下的失败说明与 Actions 日志，排除原因；

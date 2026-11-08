@@ -1,0 +1,117 @@
+# GPT 云端参与讨论（需要仓库 secret OPENAI_API_KEY）。见 docs/DEVLOOP.md。
+# 触发判定在 scripts/devloop/discuss-gate.mjs、去重与提示词在 discuss-build.mjs（均有测试）：
+# 打上 discussion / proposal 标签时首次评审一次（带标签新建也走 labeled 事件，已评审过则跳过）；
+# 之后只在评论里点名 @gpt 时回答那条评论；也可手动触发。控制费用：不是每条评论都跑。
+# 安全结构（与 openai/codex-action 官方示例一致）：
+#   review：只读令牌，Codex 以 :read-only 权限配置读仓库与讨论全文，产出回复；
+#   post  ：只有 issues:write，只负责把回复贴成评论，不运行模型。
+name: gpt-discuss
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: '要让 GPT 发言的 issue 编号'
+        required: true
+
+permissions: {}
+
+# 按 issue 串行整次运行（评审 + 发评论），保留全部排队：后到的首次评审能看到前一次已发的评论并跳过；
+# 每条 @gpt 点名各自排队、各自回答
+concurrency:
+  group: gpt-discuss-${{ github.event.issue.number || inputs.issue }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  review:
+    # 粗筛，减少无关评论启动 runner；精确判定在 discuss-gate.mjs
+    if: github.event_name != 'issue_comment' || contains(github.event.comment.body, '@gpt') || contains(github.event.comment.body, '@GPT')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      run: ${{ steps.gate.outputs.run == 'true' && steps.build.outputs.skip != 'true' }}
+      issue: ${{ steps.gate.outputs.issue }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: 判定是否发言
+        id: gate
+        run: node scripts/devloop/discuss-gate.mjs "${{ github.event_name }}" "$GITHUB_EVENT_PATH"
+      - name: 检查 OpenAI key
+        if: steps.gate.outputs.run == 'true'
+        env:
+          KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: '[ -n "$KEY" ] || { echo "::error::缺少 secret OPENAI_API_KEY"; exit 1; }'
+      - name: 取讨论全文、去重并拼提示词
+        id: build
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N: ${{ steps.gate.outputs.issue }}
+          MODE: ${{ steps.gate.outputs.mode }}
+          TRIGGER: ${{ steps.gate.outputs.comment }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/gpt"; mkdir -p "$d"
+          bash scripts/devloop/discuss-fetch.sh "$REPO" "$N" "$d"
+          node scripts/devloop/discuss-build.mjs --issue "$d/issue.json" --comments "$d/comments.jsonl" \
+            --mode "$MODE" --trigger "$TRIGGER" --header scripts/devloop/discuss-prompt.md --out "$d/prompt.md"
+      - name: GPT 评审
+        if: steps.gate.outputs.run == 'true' && steps.build.outputs.skip != 'true'
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13（标签指向的提交，非标签对象）
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # 兼容 OpenAI Responses API 的网关（仓库变量）；为空时走官方地址
+          responses-api-endpoint: ${{ vars.GPT_RESPONSES_ENDPOINT }}
+          prompt-file: ${{ runner.temp }}/gpt/prompt.md
+          output-file: ${{ runner.temp }}/gpt/reply.md
+          permission-profile: ':read-only'
+          model: ${{ vars.GPT_MODEL }}
+          effort: high
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.run == 'true' && steps.build.outputs.skip != 'true'
+        with:
+          name: gpt-reply-${{ github.run_id }}
+          path: ${{ runner.temp }}/gpt/reply.md
+          retention-days: 7
+
+  post:
+    needs: review
+    if: needs.review.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gpt-reply-${{ github.run_id }}
+          path: reply
+      - name: 发评论
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N: ${{ needs.review.outputs.issue }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          f=reply/reply.md
+          [ -s "$f" ] || { echo "::error::GPT 没有产出回复"; exit 1; }
+          # 统一第一行，便于识别与防止被当成别的执行者
+          head -1 "$f" | grep -q '^执行者：GPT' || { printf '执行者：GPT（云端评审，openai/codex-action）\n\n' | cat - "$f" > r2 && mv r2 "$f"; }
+          # 去重标记：discuss-build.mjs 只认 github-actions[bot] 发出且带此标记的评论为“已评审”
+          printf '\n\n<!-- gpt-discuss:review run=%s -->\n' "${{ github.run_id }}" >> "$f"
+          gh issue comment "$N" -R "$REPO" --body-file "$f"

@@ -5,6 +5,7 @@
 - **Claude**（GitHub Actions 云端）按 issue 写代码、开 PR、按审核意见修复
 - **GPT**（Codex CLI，审核方本机常驻）只读审核每个新提交
 - **CI** 在一次性 runner 上测试“PR 合并到当前默认分支之后”的代码
+- 可选：**GPT 云端参与讨论**——讨论 issue 打上 `discussion` / `proposal` 标签自动评审，评论里 `@gpt` 点名再回答
 - 审核与测试都通过即自动合并；卡住时打 `needs-user` 标签等人
 
 用户只提 issue、只做必须由人做的决定，agent 之间不需要人传话。
@@ -30,7 +31,7 @@ git clone <本仓库地址> ~/.claude/skills/a2a-devloop
 ## 内容
 
 - `SKILL.md`：skill 本体
-- `templates/`：完整实现（两个 GitHub Actions 工作流、审核方脚本、launchd 模板、流程文档），Node 内置模块、无依赖；`node --test templates/scripts/devloop/*.test.mjs` 共 36 项测试
+- `templates/`：完整实现（三个 GitHub Actions 工作流、审核方脚本、launchd 模板、流程文档），Node 内置模块、无依赖；`node --test templates/scripts/devloop/*.test.mjs` 共 52 项测试
 
 ## 前置条件
 
