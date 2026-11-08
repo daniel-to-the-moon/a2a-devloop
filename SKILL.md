@@ -15,7 +15,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 卡住    → needs-user 标签 + 失败说明，等人
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 66 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 73 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 一、先和用户确认（这些是用户的决定，不要替他选）
 
@@ -111,6 +111,24 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 - **带标签新建 issue 会同时产生 `opened` 和每个标签的 `labeled` 事件**：“打上某标签就让 AI 发言”只处理 `labeled`，并在发言前检查是否已有该 AI 的评论，否则一次创建会付费发言两三次。
 - 点名类 AI 回复要把**触发的那条评论（id、正文、链接）**单独交给模型并要求只回答它；全文截断时不截这条。否则两条点名先后排队，都会去回答最新那条，前一条漏答。
 
+## 三·五、本机与云端审核方并存：冲突与去重
+
+同一仓库可能同时有两个审核方：本机常驻（Codex CLI，用户账号）和云端（GitHub Actions + openai/codex-action，`GITHUB_TOKEN`）。两者都能评论、触发修复、合并，必须防止对同一提交重复动作。按强度从弱到强：
+
+1. **按内容和开关分流**（最主要的手段）：仓库变量 `CLOUD_REVIEW=on` 时，不改 `.github/workflows/` 的 PR 只归云端，改工作流的 PR 只归本机（`GITHUB_TOKEN` 没有 workflows 权限，推不了这类合并）。本机每轮读取变量，**查询失败按“未开启”处理**会和云端重叠——这是已知缺口。
+   - “改工作流”要看重命名前后两个路径：REST `pulls/N/files` 的 `filename` + `previous_filename`；`gh pr view --json files` 只给新路径，漏掉“移出工作流目录”。
+2. **终态去重**：两边共用同一把签名密钥、互认对方账号发的签名标记；判定前和推送合并前都检查当前提交是否已有 `changes` / `merged` / `stopped`（`policy.hasTerminal`），有就跳过、不评论、不触发。能挡住重放和“一方已写完、另一方才到”，挡不住**两边同时读到无终态**。
+3. **原子领取**（推荐做法，尚未进模板）：判定前在远端原子创建领取引用，例如 `git push --force-with-lease=refs/devloop/claim/pr-<N>-<head>: origin <head>:refs/devloop/claim/pr-<N>-<head>`（租约要求“该引用不存在”才成功），领取失败的一方跳过本轮；PR 关闭或合并后清理。两边都有 contents 写权限即可用，不依赖额外服务。
+4. **本机进程锁**：watch 与手动 `review` 共用一把进程锁（端口锁，进程退出即释放）；所有会写 GitHub 的入口（审核、补开遗留 issue）都要在锁内。
+
+其他会写 GitHub 的动作也要按“可能重复执行”设计：
+- **非幂等的 `gh issue create`**：服务端可能已创建、只是响应丢了。每条要开的 issue 在正文写稳定标识（`<!-- devloop-followup key=pr<N>-<head>-<序号> -->`），创建前用 REST 列表（强一致，不用有索引延迟的搜索）查重；失败后先重新核对再重试；查询失败就不创建（`templates/scripts/devloop/followups.mjs`）。
+- **合并后的收尾不能依赖评论成功**：先把待办清单落盘，再发评论；每轮补齐，全部完成才删除。已合并的 PR 不会再被扫描，丢了就永远丢了。
+- **云端工作流不要用 `pull_request` 触发**：那会用 PR 分支上的 YAML 运行，PR 能改 YAML 读到签名密钥或改写有写权限的任务。只用定时（默认分支上的定义）和手动触发，并在每个任务校验 `github.ref == 'refs/heads/main'`。
+- **审核结论要绑定本次尝试**：GitHub 重跑保留 `run_id`，固定名字的产物可能下载到上一次尝试的旧结论。产物名带 `run_attempt`、经 job 输出传递；由工作流步骤（不是模型）写入 pr / head / base 元数据，判定时逐项核对；结论按 schema 校验，不合法按审核失败处理。
+
+本地会话修复“改工作流”的 PR 时（云端推不了），先给 PR 加 `hold`、取消已排队的云端修复任务，改完推送后再去掉 `hold`；被取消的任务有时仍会发“云端执行失败”并加 `needs-user`，记得一并去掉。
+
 ## 四、故障排查
 
 | 现象 | 原因与处理 |
@@ -127,6 +145,9 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | GPT（codex-action）用的是第三方网关发的 OpenAI key | codex-action 的 `responses-api-endpoint` 指向网关的 `/v1/responses`（放仓库变量），模型只用网关允许的。先在本机验证：`/v1/models` 应 200，`/v1/responses` 用 `"stream":true` 试一次（有的网关只接受流式）。从账号说明文件里取 key 时只截 `sk-…` 这一段，避免把全角引号等字符带进去（会报 unknown_key）。注意网关限速（如并发 1、每分钟 6 次），评审排队变慢属正常。 |
 | 云端 Claude 秒退，结果里是 `429 … Usage in the last 5 hours has reached 100%` | 模型账号（或网关）的滚动额度用完，和代码无关。等提示的重置时间过后重试：实现阶段（issue）去掉 `needs-user` 与 `devloop` 再重新加 `devloop`；修复阶段（PR）用 `gh workflow run claude.yml -f pr=<N>`。连续排多项开发时拉长间隔。 |
 | 同一提交每个扫描周期都被重复评论 | 审核方认不出自己的标记：多半是 GitHub 账号改名或 `gh` 切换了账号。确认 `gh api user -q .login` 与评论作者一致；先 `launchctl bootout` 停掉审核方，取消重复的修复任务，再清理重复评论。 |
+| 云端 Claude 没启动，日志里 `Install Bun` 报 `Unexpected HTTP response: 504`，随后 `bun: command not found` | claude-code-action 内置的 setup-bun 从 GitHub 下载 Bun 失败（外部故障，可能连续数小时）。在 action 之前自己装：`npm install -g bun@<action 内置的版本>` 带退避重试，把 `command -v bun` 经 `path_to_bun_executable` 传给 action（非空时跳过内置安装）。 |
+| 云端定时审核（`schedule`）几个小时都不触发，手动 `workflow_dispatch` 正常 | GitHub 定时任务不保证准时，新加的定时可能长时间不跑。不要只靠定时：发布修复后由 `publish` 用 `gh workflow run <审核工作流>` 主动触发（`GITHUB_TOKEN` 触发 `workflow_dispatch` 是允许的），定时只作兜底。 |
+| shell 脚本里 `$FILES` 列表只被当成一个参数（`git diff -- $FILES` 输出为空） | zsh 默认不对未加引号的变量分词。用数组，或在 `bash -c` 里执行。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |
 
 ## 五、轮次用满后的处理

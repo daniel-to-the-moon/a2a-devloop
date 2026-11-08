@@ -18,7 +18,7 @@ function fakeGh(dir) {
   mkdirSync(bin, { recursive: true });
   writeFileSync(
     join(bin, 'gh'),
-    `#!/usr/bin/env bash\necho "$*" >> "${join(dir, 'gh.log')}"\nif [ "$1 $2" = "pr view" ]; then printf '%s' "$FAKE_HEAD_REF"; fi\nif [ "$1 $2" = "issue view" ]; then printf '%s' "$FAKE_ISSUE_OK"; fi\nexit "\${FAKE_GH_EXIT:-0}"\n`,
+    `#!/usr/bin/env bash\necho "$*" >> "${join(dir, 'gh.log')}"\nif [ "$1 $2" = "pr view" ]; then printf '%s' "$FAKE_HEAD_REF"; fi\nif [ "$1 $2" = "issue view" ]; then q=""; prev=""; for a in "$@"; do [ "$prev" = "-q" ] && q="$a"; prev="$a"; done; printf '%s' "$FAKE_ISSUE_JSON" | jq -r "$q"; fi\nexit "\${FAKE_GH_EXIT:-0}"\n`,
   );
   chmodSync(join(bin, 'gh'), 0o755);
   return { path: `${bin}:${process.env.PATH}`, log: () => { try { return readFileSync(join(dir, 'gh.log'), 'utf8'); } catch { return ''; } } };
@@ -203,12 +203,21 @@ test('publish：拒绝推送到非 claude/* 分支；分支已被别人更新（
   assert.equal(t.ref('refs/heads/claude/x'), theirs);
 });
 
-test('ctx：按 issue 手动触发（KIND=issue）→ implement；issue 不合规（关闭、无 devloop、带 needs-user、是 PR）则拒绝', () => {
-  const ok = runCtx({ EVENT: 'workflow_dispatch', KIND: 'issue', N: '12', FAKE_ISSUE_OK: 'ok' });
+test('ctx：按 issue 手动触发（KIND=issue）→ implement；执行 ctx.sh 里真实的筛选表达式，关闭 / 无 devloop / 带 needs-user / 是 PR 都拒绝', () => {
+  const issue = (o = {}) => JSON.stringify({ state: 'OPEN', url: 'https://github.com/o/r/issues/12', labels: [{ name: 'proposal' }, { name: 'devloop' }], ...o });
+  const run = (json, N = '12') => runCtx({ EVENT: 'workflow_dispatch', KIND: 'issue', N, FAKE_ISSUE_JSON: json });
+  const ok = run(issue());
   assert.equal(ok.code, 0, ok.stderr);
   assert.deepEqual(ok.kv, { mode: 'implement', branch: 'claude/issue-12', number: '12' });
-  assert.notEqual(runCtx({ EVENT: 'workflow_dispatch', KIND: 'issue', N: '12', FAKE_ISSUE_OK: '' }).code, 0);
-  assert.notEqual(runCtx({ EVENT: 'workflow_dispatch', KIND: 'issue', N: '12; id', FAKE_ISSUE_OK: 'ok' }).code, 0);
+  assert.equal(run(issue({ labels: [{ name: 'devloop' }] })).code, 0); // devloop 在第 0 位也认
+  const bad = {
+    关闭: issue({ state: 'CLOSED' }),
+    无devloop: issue({ labels: [{ name: 'proposal' }] }),
+    带needs_user: issue({ labels: [{ name: 'devloop' }, { name: 'needs-user' }] }),
+    是PR: issue({ url: 'https://github.com/o/r/pull/12' }),
+  };
+  for (const [k, json] of Object.entries(bad)) assert.notEqual(run(json).code, 0, k);
+  assert.notEqual(run(issue(), '12; id').code, 0);
   // 不带 KIND 的手动触发仍是修复 PR
   assert.equal(runCtx({ EVENT: 'workflow_dispatch', N: '4', FAKE_HEAD_REF: 'claude/x' }).kv.mode, 'fix');
 });
