@@ -1,7 +1,7 @@
 // claude.yml 用到的 ctx.sh / publish.sh 的行为测试：假 gh（记录调用、返回预设值）+ 真 git（本地临时远端）
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -229,4 +229,80 @@ test('claude.yml：手动触发有 pr / issue 两个可选输入，二选一；�
   assert.match(yml, /KIND: \$\{\{ inputs\.issue && 'issue' \|\| '' \}\}/);
   assert.match(yml, /pr 与 issue 只能填一个/);
   assert.doesNotMatch(yml, /github\.event\.issue\.number \|\| inputs\.pr \}\}/);
+});
+
+/**
+ * install-bun.sh 行为测试：假 npm（按 plan 逐次成功 / 失败，成功时在 PATH 里放一个假 bun）、假 sleep（只记录秒数）。
+ * plan 例：'fail,ok'；'ok-broken' 表示 npm 成功但装出的 bun 不能运行。
+ */
+function runInstallBun(plan) {
+  const dir = join(root, `bun-${n++}`);
+  const bin = join(dir, 'bin');
+  const npmBin = join(dir, 'npm-global');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(npmBin, { recursive: true });
+  writeFileSync(join(dir, 'plan'), plan.split(',').join('\n') + '\n');
+  writeFileSync(
+    join(bin, 'npm'),
+    `#!/usr/bin/env bash
+echo "npm $*" >> "${dir}/log"
+step=$(head -n 1 "${dir}/plan"); sed -i.bak 1d "${dir}/plan"
+case "$step" in
+  ok) printf '#!/usr/bin/env bash\\necho 1.4.4\\n' > "${npmBin}/bun"; chmod +x "${npmBin}/bun"; exit 0 ;;
+  ok-broken) printf '#!/usr/bin/env bash\\nexit 3\\n' > "${npmBin}/bun"; chmod +x "${npmBin}/bun"; exit 0 ;;
+  *) exit 1 ;;
+esac
+`,
+  );
+  writeFileSync(join(bin, 'sleep'), `#!/usr/bin/env bash\necho "sleep $1" >> "${dir}/log"\n`);
+  chmodSync(join(bin, 'npm'), 0o755);
+  chmodSync(join(bin, 'sleep'), 0o755);
+  const out = join(dir, 'out');
+  writeFileSync(out, '');
+  const r = spawnSync('bash', [join(HERE, 'install-bun.sh')], {
+    env: { ...process.env, PATH: `${bin}:${npmBin}:/usr/bin:/bin`, GITHUB_OUTPUT: out },
+    encoding: 'utf8',
+  });
+  const log = existsSync(join(dir, 'log')) ? readFileSync(join(dir, 'log'), 'utf8').trim().split('\n') : [];
+  return { code: r.status, out: readFileSync(out, 'utf8'), log, npmBin };
+}
+
+test('install-bun.sh：首次成功 → 不等待，输出可执行路径', () => {
+  const r = runInstallBun('ok');
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.log, ['npm install -g --no-audit --no-fund bun@1.4.4']);
+  assert.equal(r.out, `path=${join(r.npmBin, 'bun')}\n`);
+});
+
+test('install-bun.sh：失败后重试成功 → 按 15、30 秒退避，成功即停', () => {
+  const r = runInstallBun('fail,fail,ok');
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.log.filter((l) => l.startsWith('sleep')), ['sleep 15', 'sleep 30']);
+  assert.equal(r.log.filter((l) => l.startsWith('npm')).length, 3);
+  assert.match(r.out, /^path=.*\/bun\n$/);
+});
+
+test('install-bun.sh：连续三次失败（或装出的 bun 不能运行）→ 非零退出、不输出路径（action 不会拿到空路径继续）', () => {
+  for (const plan of ['fail,fail,fail', 'ok-broken,ok-broken,ok-broken']) {
+    const r = runInstallBun(plan);
+    assert.notEqual(r.code, 0, plan);
+    assert.equal(r.out, '', plan);
+    assert.equal(r.log.filter((l) => l.startsWith('npm')).length, 3, plan);
+    assert.deepEqual(r.log.filter((l) => l.startsWith('sleep')), ['sleep 15', 'sleep 30'], plan); // 最后一次失败后不再等待
+  }
+});
+
+test('claude.yml：action 之前运行 install-bun.sh，并把它输出的路径交给 path_to_bun_executable', () => {
+  const yml = readFileSync(join(HERE, '../../.github/workflows/claude.yml'), 'utf8');
+  const bunAt = yml.indexOf('id: bun');
+  assert.ok(bunAt > 0 && bunAt < yml.indexOf('uses: anthropics/claude-code-action'));
+  assert.match(yml, /id: bun\n(?: {8}#.*\n)* {8}run: bash "\$RUNNER_TEMP\/install-bun\.sh"/);
+  // 工作区根目录的检出会清空根目录（含 _devloop）：脚本必须在 _devloop 检出之后、根目录检出之前复制到 RUNNER_TEMP
+  const steps = yml.slice(yml.indexOf('  work:'), yml.indexOf('uses: anthropics/claude-code-action'));
+  const devloopCheckout = steps.indexOf('path: _devloop');
+  const copy = steps.indexOf('cp _devloop/scripts/devloop/install-bun.sh "$RUNNER_TEMP/install-bun.sh"');
+  const rootCheckout = steps.indexOf("ref: ${{ steps.ctx.outputs.mode == 'fix'");
+  assert.ok(devloopCheckout > 0 && devloopCheckout < copy && copy < rootCheckout && rootCheckout < steps.indexOf('id: bun'), '顺序须为：检出 _devloop → 复制脚本 → 检出根目录 → 运行脚本');
+  assert.doesNotMatch(steps.slice(rootCheckout), /_devloop\//, '根目录检出之后不能再引用 _devloop');
+  assert.match(yml, /path_to_bun_executable: \$\{\{ steps\.bun\.outputs\.path \}\}/);
 });

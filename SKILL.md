@@ -15,7 +15,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 卡住    → needs-user 标签 + 失败说明，等人
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 73 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 77 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 一、先和用户确认（这些是用户的决定，不要替他选）
 
@@ -145,7 +145,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | GPT（codex-action）用的是第三方网关发的 OpenAI key | codex-action 的 `responses-api-endpoint` 指向网关的 `/v1/responses`（放仓库变量），模型只用网关允许的。先在本机验证：`/v1/models` 应 200，`/v1/responses` 用 `"stream":true` 试一次（有的网关只接受流式）。从账号说明文件里取 key 时只截 `sk-…` 这一段，避免把全角引号等字符带进去（会报 unknown_key）。注意网关限速（如并发 1、每分钟 6 次），评审排队变慢属正常。 |
 | 云端 Claude 秒退，结果里是 `429 … Usage in the last 5 hours has reached 100%` | 模型账号（或网关）的滚动额度用完，和代码无关。等提示的重置时间过后重试：实现阶段（issue）去掉 `needs-user` 与 `devloop` 再重新加 `devloop`；修复阶段（PR）用 `gh workflow run claude.yml -f pr=<N>`。连续排多项开发时拉长间隔。 |
 | 同一提交每个扫描周期都被重复评论 | 审核方认不出自己的标记：多半是 GitHub 账号改名或 `gh` 切换了账号。确认 `gh api user -q .login` 与评论作者一致；先 `launchctl bootout` 停掉审核方，取消重复的修复任务，再清理重复评论。 |
-| 云端 Claude 没启动，日志里 `Install Bun` 报 `Unexpected HTTP response: 504`，随后 `bun: command not found` | claude-code-action 内置的 setup-bun 从 GitHub 下载 Bun 失败（外部故障，可能连续数小时）。在 action 之前自己装：`npm install -g bun@<action 内置的版本>` 带退避重试，把 `command -v bun` 经 `path_to_bun_executable` 传给 action（非空时跳过内置安装）。 |
+| 云端 Claude 没启动，日志里 `Install Bun` 报 `Unexpected HTTP response: 504`，随后 `bun: command not found` | claude-code-action 内置的 setup-bun 从 GitHub 下载 Bun 失败（外部故障，可能连续数小时）。模板已改为在 action 之前运行 `scripts/devloop/install-bun.sh`（从 npm 装同版本、退避重试、装出的 bun 能运行才输出路径），路径经 `path_to_bun_executable` 交给 action。注意：工作区根目录的 `actions/checkout` 会**清空根目录**（包括先检出到子目录的可信脚本），所以要在根目录检出之前把脚本复制到 `$RUNNER_TEMP`。 |
 | 云端定时审核（`schedule`）几个小时都不触发，手动 `workflow_dispatch` 正常 | GitHub 定时任务不保证准时，新加的定时可能长时间不跑。不要只靠定时：发布修复后由 `publish` 用 `gh workflow run <审核工作流>` 主动触发（`GITHUB_TOKEN` 触发 `workflow_dispatch` 是允许的），定时只作兜底。 |
 | shell 脚本里 `$FILES` 列表只被当成一个参数（`git diff -- $FILES` 输出为空） | zsh 默认不对未加引号的变量分词。用数组，或在 `bash -c` 里执行。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |

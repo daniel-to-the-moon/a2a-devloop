@@ -3,7 +3,7 @@
  *
  * 审核方账号每次读取都重新查询（`gh api user`），不在启动时缓存：
  * GitHub 账号改名后，历史评论的作者也显示为新用户名；若缓存旧名，审核方会认不出自己的签名标记，
- * 对同一提交反复评论并重复触发云端修复（2026-11-07 在 #4 实际发生）。
+ * 对同一提交反复评论并重复触发云端修复（真实发生过）。
  */
 import { parseMarkers } from './policy.mjs';
 import { CLOUD_REVIEWER_LOGINS } from './review-format.mjs';
