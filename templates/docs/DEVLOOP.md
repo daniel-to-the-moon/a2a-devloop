@@ -50,12 +50,21 @@
 
 | 标签 | 含义 |
 |---|---|
-| `needs-user` | 循环停下等用户：同一 PR 5 轮未通过；同一提交 3 次基础设施问题；Claude 判断命中停止条件；云端执行失败 |
+| `needs-user` | 循环停下等用户：同一 PR 5 轮未通过（`ROUND_LIMIT_MODE=needs-user`，默认）；auto 模式下出现 blocker 或意见数回升；同一提交 3 次基础设施问题；Claude 判断命中停止条件；云端执行失败 |
 | `hold` | 用户手动暂停某 PR |
 
 Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费 / 广告 / 对公众上线；需要新的付费服务或账号；需求互相矛盾或违反项目硬边界；信息不足。
 
 标记 `state:reason`：`changes`（触发修复，该提交不再审）、`merged`、`stopped`、`retry`（下一轮重试）。HMAC 签名，密钥只在审核方本机；只认审核方账号、以“执行者：GPT”开头的评论，每条只认最后一个标记。只处理“打开、非草稿、目标 main”的 PR。
+
+### 轮次用满后的处理（仓库变量 `ROUND_LIMIT_MODE`，用户自选）
+
+| 值 | 第 5 轮仍未通过时 |
+|---|---|
+| `needs-user`（默认，未设置也是它） | 停下、加 `needs-user`，等用户裁决。 |
+| `auto`（免人工合码） | 有 blocker 或意见数比上一轮多 → 仍停下加 `needs-user`；意见数减少 → 自动追加一轮（最多追加 3 轮）；持平或追加用完，且剩余只有 major / minor、CI 通过、无冲突 → 合并，剩余意见逐条开 `devloop` issue。 |
+
+切换：`gh variable set ROUND_LIMIT_MODE --body auto`（改回 `--body needs-user`）。风险：auto 会合并 GPT 仍认为有 major 问题的代码，靠后续 issue 修。
 
 ## 讨论与 GPT 云端评审（可选）
 

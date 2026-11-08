@@ -19,7 +19,10 @@ on:
     inputs:
       pr:
         description: '要修复的 PR 编号（按其最新一条 GPT 审核评论修复）'
-        required: true
+        required: false
+      issue:
+        description: '要实现的 issue 编号（云端审核开的遗留意见 issue 用；与 pr 二选一）'
+        required: false
 
 permissions: {}
 
@@ -40,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     concurrency:
-      group: claude-${{ github.event.issue.number || inputs.pr }}
+      group: claude-${{ github.event.issue.number || inputs.pr || inputs.issue }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -63,10 +66,14 @@ jobs:
         id: ctx
         env:
           GH_TOKEN: ${{ github.token }}
-          N: ${{ github.event.issue.number || inputs.pr }}
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
           EVENT: ${{ github.event_name }}
           REPO: ${{ github.repository }}
-        run: bash _devloop/scripts/devloop/ctx.sh
+          KIND: ${{ inputs.issue && 'issue' || '' }}
+          BOTH: ${{ inputs.issue && inputs.pr && 'yes' || '' }}
+        run: |
+          [ -z "$BOTH" ] || { echo "::error::pr 与 issue 只能填一个" >&2; exit 1; }
+          bash _devloop/scripts/devloop/ctx.sh
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.ctx.outputs.mode == 'fix' && steps.ctx.outputs.branch || 'main' }}
@@ -105,7 +112,7 @@ jobs:
               - $OUT/title.txt：PR 标题（implement 模式且 outcome 为 pr 时）
               - $OUT/body.md：PR 描述，或给 issue / PR 的评论正文；开头写“执行者：Claude（devloop）”
 
-            模式：${{ steps.ctx.outputs.mode }}；编号：#${{ github.event.issue.number || inputs.pr }}；已检出分支：${{ steps.ctx.outputs.mode == 'fix' && steps.ctx.outputs.branch || 'main' }}
+            模式：${{ steps.ctx.outputs.mode }}；编号：#${{ github.event.issue.number || inputs.pr || inputs.issue }}；已检出分支：${{ steps.ctx.outputs.mode == 'fix' && steps.ctx.outputs.branch || 'main' }}
 
             通用要求：
             - 先读 {{PROJECT_RULES}}、docs/DEVLOOP.md。遵守项目硬边界；新增数值或事实主张注明“提案 / 待核实”或给出推演 / 来源。
@@ -113,11 +120,11 @@ jobs:
               改了 scripts/devloop 时 `node --test scripts/devloop/*.test.mjs`；纯文档改动不需要 npm。不通过就继续修，不要提交失败的代码。
             - 不要合并、不要审核自己的改动。
 
-            implement 模式：用 `gh issue view ${{ github.event.issue.number || inputs.pr }} --comments` 读 issue。
+            implement 模式：用 `gh issue view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --comments` 读 issue。
               命中 docs/DEVLOOP.md 第五节任一停止条件或信息不足 → outcome 写 needs-user，body.md 写原因，不改代码。
-              否则实现需求并为新增或改动的逻辑写测试，本地 commit；body.md 写明改了什么、怎么验证、哪些是提案值，末尾 `Closes #${{ github.event.issue.number || inputs.pr }}`。
+              否则实现需求并为新增或改动的逻辑写测试，本地 commit；body.md 写明改了什么、怎么验证、哪些是提案值，末尾 `Closes #${{ github.event.issue.number || inputs.pr || inputs.issue }}`。
 
-            fix 模式：用 `gh pr view ${{ github.event.issue.number || inputs.pr }} --comments` 读 PR，以最新一条“执行者：GPT”评论为准。
+            fix 模式：用 `gh pr view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --comments` 读 PR，以最新一条“执行者：GPT”评论为准。
               逐条处理 blocker 与 major；minor 合理就改；不同意的给出依据，不要静默忽略。
               测试失败时用评论里 Actions 链接的运行号执行 `gh run view <运行号> --log-failed` 看日志；冲突时 `git merge origin/main` 解决。
               本地 commit；body.md 逐条列出每个意见的处理结果。
@@ -185,7 +192,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          N: ${{ github.event.issue.number || inputs.pr }}
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
           MODE: ${{ needs.work.outputs.mode }}
           BRANCH: ${{ needs.work.outputs.branch }}
           START: ${{ needs.work.outputs.start }}
@@ -202,7 +209,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          N: ${{ github.event.issue.number || inputs.pr }}
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
           BRANCH: ${{ needs.work.outputs.branch }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

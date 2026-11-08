@@ -18,7 +18,7 @@ function fakeGh(dir) {
   mkdirSync(bin, { recursive: true });
   writeFileSync(
     join(bin, 'gh'),
-    `#!/usr/bin/env bash\necho "$*" >> "${join(dir, 'gh.log')}"\nif [ "$1 $2" = "pr view" ]; then printf '%s' "$FAKE_HEAD_REF"; fi\nexit "\${FAKE_GH_EXIT:-0}"\n`,
+    `#!/usr/bin/env bash\necho "$*" >> "${join(dir, 'gh.log')}"\nif [ "$1 $2" = "pr view" ]; then printf '%s' "$FAKE_HEAD_REF"; fi\nif [ "$1 $2" = "issue view" ]; then printf '%s' "$FAKE_ISSUE_OK"; fi\nexit "\${FAKE_GH_EXIT:-0}"\n`,
   );
   chmodSync(join(bin, 'gh'), 0o755);
   return { path: `${bin}:${process.env.PATH}`, log: () => { try { return readFileSync(join(dir, 'gh.log'), 'utf8'); } catch { return ''; } } };
@@ -201,4 +201,23 @@ test('publish：拒绝推送到非 claude/* 分支；分支已被别人更新（
   const theirs = t.ref('refs/heads/claude/x');
   assert.notEqual(t.run({ MODE: 'fix', EVENT: 'issue_comment' }).status, 0);
   assert.equal(t.ref('refs/heads/claude/x'), theirs);
+});
+
+test('ctx：按 issue 手动触发（KIND=issue）→ implement；issue 不合规（关闭、无 devloop、带 needs-user、是 PR）则拒绝', () => {
+  const ok = runCtx({ EVENT: 'workflow_dispatch', KIND: 'issue', N: '12', FAKE_ISSUE_OK: 'ok' });
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.deepEqual(ok.kv, { mode: 'implement', branch: 'claude/issue-12', number: '12' });
+  assert.notEqual(runCtx({ EVENT: 'workflow_dispatch', KIND: 'issue', N: '12', FAKE_ISSUE_OK: '' }).code, 0);
+  assert.notEqual(runCtx({ EVENT: 'workflow_dispatch', KIND: 'issue', N: '12; id', FAKE_ISSUE_OK: 'ok' }).code, 0);
+  // 不带 KIND 的手动触发仍是修复 PR
+  assert.equal(runCtx({ EVENT: 'workflow_dispatch', N: '4', FAKE_HEAD_REF: 'claude/x' }).kv.mode, 'fix');
+});
+
+test('claude.yml：手动触发有 pr / issue 两个可选输入，二选一；编号表达式都含 inputs.issue', () => {
+  const yml = readFileSync(join(HERE, '../../.github/workflows/claude.yml'), 'utf8');
+  assert.match(yml, /issue:\n {8}description: .*\n {8}required: false/);
+  assert.match(yml, /pr:\n {8}description: .*\n {8}required: false/);
+  assert.match(yml, /KIND: \$\{\{ inputs\.issue && 'issue' \|\| '' \}\}/);
+  assert.match(yml, /pr 与 issue 只能填一个/);
+  assert.doesNotMatch(yml, /github\.event\.issue\.number \|\| inputs\.pr \}\}/);
 });

@@ -1,7 +1,7 @@
 // node --test scripts/devloop/*.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { decide, eligible, marker, MAX_CI_RETRIES, MAX_ROUNDS, parseMarkers, roundsUsed, shouldReview } from './policy.mjs';
+import { decide, eligible, EXTRA_ROUNDS, lastFindings, limitMode, marker, MAX_CI_RETRIES, MAX_ROUNDS, parseMarkers, roundsUsed, shouldReview } from './policy.mjs';
 
 const KEY = 'test-key';
 const PR = 6;
@@ -114,4 +114,82 @@ test(`基础设施问题（CI 未完成 / GPT 审核失败）：同一提交第 
   }
   const c = { author: REV, body: `执行者：GPT\n${marker(KEY, { pr: PR, state: 'retry', reason: 'infra', head: H, base: B })}` };
   assert.deepEqual(parse([c]).map((m) => [m.state, m.reason]), [['retry', 'infra']]);
+});
+
+// ---- 轮次用满后的处理方式（ROUND_LIMIT_MODE） ----
+const fd = (severity) => ({ severity, file: 'a.ts', line: 1, issue: 'i', suggestion: 's' });
+const lim = (o = {}) => {
+  const now0 = { labels: [], base: B, mergeable: 'MERGEABLE', state: 'OPEN', isDraft: false, baseRefName: 'main' };
+  return decide({
+    ci: { status: 'ok', base: B, ...(o.ci ?? {}) },
+    review: { verdict: 'request_changes', summary: 's', findings: o.findings ?? [fd('major')] },
+    now: { ...now0, ...(o.now ?? {}) },
+    roundsBefore: o.roundsBefore ?? MAX_ROUNDS - 1,
+    allowMerge: o.allowMerge ?? true,
+    mode: 'mode' in o ? o.mode : 'auto',
+    prevFindings: o.prev === undefined ? 2 : o.prev,
+  });
+};
+
+test('limitMode：只认 needs-user / auto，其余（含空）按 needs-user', () => {
+  assert.equal(limitMode('auto'), 'auto');
+  for (const v of ['', undefined, 'AUTO', 'merge']) assert.equal(limitMode(v), 'needs-user');
+});
+
+test('needs-user 模式（默认）：轮次用满即停、加 needs-user，与原行为一致', () => {
+  for (const mode of ['needs-user', undefined, 'bogus']) {
+    const d = lim({ mode, findings: [fd('minor')], prev: 5 });
+    assert.equal(d.state, 'stopped');
+    assert.equal(d.addLabel, 'needs-user');
+  }
+});
+
+test('auto：意见数减少 → 追加轮次（changes），直到第 MAX+EXTRA 轮', () => {
+  const d = lim({ findings: [fd('major')], prev: 2 });
+  assert.equal(d.state, 'changes');
+  assert.equal(d.reason, 'f1');
+  const last = lim({ findings: [fd('major')], prev: 2, roundsBefore: MAX_ROUNDS + EXTRA_ROUNDS - 1 });
+  assert.equal(last.state, 'merged'); // 追加轮次用完、无 blocker、CI 通过 → 合并
+  assert.equal(last.reason, 'limit');
+});
+
+test('auto：意见数持平（或上一轮无记录）、无 blocker、CI 通过 → 合并并带上遗留意见', () => {
+  for (const prev of [1, null]) {
+    const d = lim({ findings: [fd('major')], prev });
+    assert.equal(d.state, 'merged', String(prev));
+    assert.equal(d.merge, true);
+    assert.deepEqual(d.followUpFindings, [fd('major')]);
+  }
+});
+
+test('auto：有 blocker 或意见数增加 → 停下加 needs-user', () => {
+  for (const o of [{ findings: [fd('blocker')], prev: 3 }, { findings: [fd('minor'), fd('minor'), fd('minor')], prev: 2 }]) {
+    const d = lim(o);
+    assert.equal(d.state, 'stopped', JSON.stringify(o));
+    assert.equal(d.addLabel, 'needs-user');
+  }
+});
+
+test('auto：CI 失败或冲突 → 追加轮次修复；追加用完仍失败 → 停下', () => {
+  assert.equal(lim({ ci: { status: 'failed' }, prev: 1 }).state, 'changes');
+  assert.equal(lim({ now: { mergeable: 'CONFLICTING' }, prev: 1 }).state, 'changes');
+  assert.equal(lim({ ci: { status: 'failed' }, prev: 1, roundsBefore: MAX_ROUNDS + EXTRA_ROUNDS - 1 }).state, 'stopped');
+});
+
+test('auto：可合并但 main 已变 / --no-merge → retry，不合并', () => {
+  assert.equal(lim({ prev: 1, now: { base: 'c'.repeat(40) } }).state, 'retry');
+  assert.equal(lim({ prev: 1, allowMerge: false }).state, 'retry');
+});
+
+test('auto：未到轮次上限时行为不变；changes 标记记下意见数 f<n>，lastFindings 取最近一条', () => {
+  const d = lim({ roundsBefore: 1, findings: [fd('minor'), fd('major')] });
+  assert.equal(d.state, 'changes');
+  assert.equal(d.reason, 'f2');
+  const ms = [{ state: 'changes', reason: 'f4', head: H }, { state: 'retry', reason: 'infra', head: H }, { state: 'changes', reason: 'f2', head: B }];
+  assert.equal(lastFindings(ms), 2);
+  assert.equal(lastFindings([{ state: 'changes', reason: 'none', head: H }]), null);
+  assert.equal(lastFindings([]), null);
+  // 带 f<n> 的标记签名可验证
+  const c = { author: REV, body: `执行者：GPT\n${marker(KEY, { pr: PR, state: 'changes', reason: 'f3', head: H, base: B })}` };
+  assert.deepEqual(parse([c]).map((m) => [m.state, m.reason]), [['changes', 'f3']]);
 });

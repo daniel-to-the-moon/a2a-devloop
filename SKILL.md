@@ -15,7 +15,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 卡住    → needs-user 标签 + 失败说明，等人
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 52 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 66 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 一、先和用户确认（这些是用户的决定，不要替他选）
 
@@ -25,7 +25,10 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
    - GPT 审核：有 OpenAI API key 可以放云端（openai/codex-action）；只有 ChatGPT 订阅就放本机 Codex CLI（本模板的做法）。
    - key 让用户自己 `gh secret set <NAME> -R <repo>` 粘贴，**永远不要让用户把 key 发进对话**。
 3. **托管 / 发布**：本模板只把构建产物上传为私有 Actions artifact，不部署任何对外地址。个人免费托管套餐常常禁止商业用途，商业项目要用户选。
-4. **残余风险告知**：本机关机即停审；分支保护在私有仓库需付费套餐；云端执行代码的任务里有模型 key（建议设用量上限）；代码会经过所选模型网关。
+4. **轮次用满后怎么办**（仓库变量 `ROUND_LIMIT_MODE`，让用户二选一，默认 `needs-user`）：
+   - `needs-user`：5 轮仍未通过就停下、加 `needs-user`，由用户裁决（见第五节）；
+   - `auto`（免人工合码）：blocker 或意见数回升仍停下；意见数减少自动追加轮次（最多 3 轮）；持平或追加用完、无 blocker、CI 通过即合并，剩余意见逐条开 `devloop` issue。代价是会合并 GPT 仍认为有 major 问题的代码，靠后续 issue 修。
+5. **残余风险告知**：本机关机即停审；分支保护在私有仓库需付费套餐；云端执行代码的任务里有模型 key（建议设用量上限）；代码会经过所选模型网关。
 
 ## 二、搭建步骤
 
@@ -126,7 +129,14 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | 同一提交每个扫描周期都被重复评论 | 审核方认不出自己的标记：多半是 GitHub 账号改名或 `gh` 切换了账号。确认 `gh api user -q .login` 与评论作者一致；先 `launchctl bootout` 停掉审核方，取消重复的修复任务，再清理重复评论。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |
 
-## 五、轮次用满后的人工裁决
+## 五、轮次用满后的处理
+
+由 `ROUND_LIMIT_MODE` 决定（`policy.mjs` 的 `decide`，两边审核方共用；本机每次判定时 `gh variable get` 读取，查询失败按 `needs-user`）。
+- `auto` 的“意见数”记在每条 `changes` 标记的 reason 里（`changes:f<n>`，在签名覆盖范围内）；旧标记没有记录时按持平处理。
+- `auto` 合并后开的遗留 issue：本机用用户账号开，`devloop` 标签会触发 `claude.yml`；若由 `GITHUB_TOKEN` 开（云端审核），标签不触发工作流，要 `gh workflow run claude.yml -f issue=<N>`（`claude.yml` 的手动触发有 `pr` / `issue` 两个输入，二选一；`ctx.sh` 校验 issue 打开、带 `devloop`、不带 `needs-user`）。
+- 经验：真实 PR 上逐轮意见数常是 2 → 2 → 2 → 1 → 1 → 1，后几轮每次只剩一条新的边角 major；`needs-user` 模式下这类 PR 会反复回到用户手里，`auto` 模式会在持平时直接合并并把那条转 issue。
+
+### `needs-user` 模式的人工裁决
 
 PR 达到轮次上限被打 `needs-user` 时，把剩余问题按严重度和影响面（例如“仅开发模式可达”）整理给用户，给三个选项：再给一轮修复（`gh workflow run claude.yml -f pr=<N>`）、先合并并把剩余问题转成带 `devloop` 标签的 issue、先放着。经验：问题数逐轮收敛、剩余问题影响面很窄时，用户多半选先合并。
 
