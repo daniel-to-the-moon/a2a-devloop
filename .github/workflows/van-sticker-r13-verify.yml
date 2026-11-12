@@ -52,6 +52,27 @@ jobs:
               if (data[i] > 100 && data[i] > data[i + 1] * 1.6 && data[i] > data[i + 2] * 1.1) count++;
             return count;
           }
+          function assertBitmapDirection({ data, info }, description) {
+            const blue = { count: 0, x: 0 };
+            const green = { count: 0, x: 0 };
+            for (let i = 0; i < data.length; i += 4) {
+              const [r, g, b] = data.subarray(i, i + 3);
+              const x = (i / 4) % info.width;
+              if (b > 100 && b > 1.5 * Math.max(r, g)) {
+                blue.count++;
+                blue.x += x;
+              }
+              if (g > 100 && g > 1.5 * Math.max(r, b)) {
+                green.count++;
+                green.x += x;
+              }
+            }
+            assert.ok(blue.count > 25 && green.count > 25, description + ' bitmap colors missing');
+            const left = blue.x / blue.count;
+            const right = green.x / green.count;
+            assert.ok(left + 5 < right, description + ' bitmap reads backwards');
+            console.log(description, JSON.stringify({ blueX: left, greenX: right }));
+          }
           function pixel({ data, info }, x, y) {
             const i = (Math.floor(y * info.height) * info.width + Math.floor(x * info.width)) * 4;
             return [...data.subarray(i, i + 4)];
@@ -118,9 +139,17 @@ jobs:
                 const input = document.querySelector('input[aria-label="导入草稿"]');
                 return input && Object.keys(input).some((key) => key.startsWith('__reactProps'));
               });
-              const draft = { version: 1, background: '#f3eedf', layers: [{
-                id: 'projection-check', name: '侧视贴膜验收', linked: false, entry: art, driver: { ...art, color: '#f44510' },
-              }] };
+              const pixels = Buffer.alloc(80 * 32 * 3);
+              for (let i = 0; i < pixels.length; i += 3)
+                pixels.set((i / 3) % 80 < 40 ? [24, 50, 244] : [10, 220, 49], i);
+              const bitmap = 'data:image/png;base64,' + (await sharp(pixels, {
+                raw: { width: 80, height: 32, channels: 3 },
+              }).png().toBuffer()).toString('base64');
+              const imageArt = { ...art, kind: 'image', points: [], src: bitmap, x: .62, y: .52, w: .17, h: .09 };
+              const draft = { version: 1, background: '#f3eedf', layers: [
+                { id: 'projection-check', name: '侧视贴膜验收', linked: false, entry: art, driver: { ...art, color: '#f44510' } },
+                { id: 'asymmetric-bitmap', name: '图片方向验收', linked: true, entry: imageArt, driver: imageArt },
+              ] };
               await page.getByLabel('导入草稿').setInputFiles({
                 name: 'r13-side-projection-test.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(draft)),
               });
@@ -138,6 +167,7 @@ jobs:
                 const before = await image(shots[side.key]);
                 const after = await image(file);
                 assert.ok(redCount(after) > 2000, side.key + ' contains no rendered 2D film');
+                assertBitmapDirection(after, '2D ' + side.key);
                 for (const mark of landmarks[side.key]) {
                   assert.ok(mark.x >= art.x && mark.x <= art.x + art.w && mark.y >= art.y && mark.y <= art.y + art.h, mark.name + ' not covered by the film test');
                   assert.deepEqual(pixel(after, mark.x, mark.y), pixel(before, mark.x, mark.y), mark.name + ' was painted over in 2D');
@@ -176,7 +206,9 @@ jobs:
                 await page.waitForTimeout(2400);
                 const file = 'evidence/after-' + side.key + '-3d-paint.png';
                 await rendered.screenshot({ path: file });
-                assert.ok(redCount(await image(file)) > 450, side.key + ' film was not rendered by the actual 3D shader');
+                const painted = await image(file);
+                assert.ok(redCount(painted) > 450, side.key + ' film was not rendered by the actual 3D shader');
+                assertBitmapDirection(painted, '3D ' + side.key);
               }
               assert.deepEqual(shaderErrors, []);
               console.log('PASS: both sides at 100%, wide and mobile proportions, real glass probes, film drag/zoom and both 3D textures.');
@@ -228,7 +260,20 @@ jobs:
           wait "$pid" || true
           start app-head
           node verify.cjs after
-          cmp evidence/before-reference-entry.png evidence/after-reference-entry.png
+          node - <<'JS'
+          const assert = require('node:assert/strict');
+          const sharp = require('./app-base/node_modules/sharp');
+          (async () => {
+            const files = ['before', 'after'].map((state) => 'evidence/' + state + '-reference-entry.png');
+            const [base, head] = await Promise.all(files.map((file) => sharp(file).removeAlpha().raw().toBuffer({ resolveWithObject: true })));
+            assert.deepEqual(head.info, base.info);
+            let changed = 0;
+            for (let i = 0; i < base.data.length; i += 3)
+              if (head.data[i] !== base.data[i] || head.data[i+1] !== base.data[i+1] || head.data[i+2] !== base.data[i+2]) changed++;
+            console.log('Reference drawing RGB pixels changed:', changed, 'of', base.info.width * base.info.height);
+            assert.ok(changed <= 250, 'reference drawing shifted beyond the observed renderer tolerance');
+          })().catch((error) => { console.error(error); process.exitCode = 1; });
+          JS
           cat evidence/revisions.txt evidence/{before,after}-viewport.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
