@@ -1,0 +1,35 @@
+name: Generate the R13 projected texture sampling snippets with Fable 5
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-r13-shader-fable.yml]
+permissions: {}
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Generate only the projected free-wrap shader and attribute snippets
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          cat > input.txt <<'PROMPT'
+          Give three SHORT source snippets for an existing Three.js TypeScript class. Output JSON keys shaderDeclaration, shaderSample, bakeXY, all strings. No other fields, no code fences. Think briefly.
+          shaderDeclaration: GLSL vertex attribute vec2 aDesignProjection and varying vec2 vDesignProjection in declaration.
+          shaderSample: full GLSL uHasDesign if block using existing uHasDesign, vWrapEligible, vWrapCoord.x, uDecalPeriod and uDesignSize. Preserve s side gates entry [0,L] driver [L+W,2L+W]. Use y=vDesignProjection.y, entry x=1.-vDesignProjection.x, driver x=vDesignProjection.x. Continue original diffuse mix by texture alpha. The 2D guide is from GLB orthographic world x/y and both sides' editing x runs nose to rear. Entry SVG texture is already mirrored. Only this production shader uses the snippets; profile mode keeps old shader branch. Existing palette/decal remain outside.
+          bakeXY: TypeScript statements for each vertex i in existing closed-pose world iteration, using projectSidePoint(projection,world.x,world.y) returning {x,y}; fill a Float32Array named designCoords at i*2 and i*2+1. Existing geometry assigns the aDesignProjection attribute after the loop. Door motion then retains its UV.
+          PROMPT
+          jq -n --rawfile prompt input.txt '{model:"claude-fable-5",max_tokens:4200,thinking:{type:"disabled"},messages:[{role:"user",content:$prompt}]}' > request.json
+          curl -fsS --max-time 260 \
+            -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
+            -H 'anthropic-version: 2023-06-01' \
+            -H 'Content-Type: application/json' \
+            --data-binary @request.json https://lanyiapi.com/v1/messages -o response.json
+          jq -c '{stop_reason,types:[.content[]?.type]}' response.json
+          jq -er '[.content[] | select(.type == "text") | .text] | join("") | select(length>10)' response.json > shader-snippets.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r13-fable-shader-snippets
+          path: shader-snippets.txt
+          if-no-files-found: error
