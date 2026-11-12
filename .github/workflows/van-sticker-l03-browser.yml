@@ -1,0 +1,129 @@
+name: Van Sticker Studio L03 browser acceptance
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-l03-browser.yml]
+permissions:
+  actions: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: l03-candidate
+          path: candidate
+          github-token: ${{ github.token }}
+          run-id: 43249088563
+      - name: Install project and Chromium
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch feature/44-interior-placement https://github.com/daniel-to-the-moon/van-sticker-studio.git project
+          test "$(git -C project rev-parse HEAD)" = 096c613636c0b48b67bcf1e0785d67acd99d9086
+          npm --prefix project ci
+          npm install --prefix "$RUNNER_TEMP/l03-browser" --no-audit --no-fund playwright@1.56.1
+          "$RUNNER_TEMP/l03-browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Verify baseline failure and candidate in Chromium
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cat > browser.cjs <<'TEST'
+          const assert = require('node:assert/strict');
+          const { chromium } = require(process.env.RUNNER_TEMP + '/l03-browser/node_modules/playwright');
+          async function main() {
+            const browser = await chromium.launch();
+            try {
+              const page = await browser.newPage({ viewport: { width: 1400, height: 980 } });
+              await page.goto('http://127.0.0.1:4173/interior-layout');
+              const palette = page.getByTestId('fixture-palette');
+              if (process.argv[2] === 'baseline') {
+                await palette.waitFor({ timeout: 1800 }).then(
+                  () => { throw Error('Baseline unexpectedly contains placement controls'); },
+                  (error) => {
+                    assert.equal(error.name, 'TimeoutError');
+                    console.log('RED: baseline has no placement controls');
+                  },
+                );
+                return;
+              }
+              const board = page.getByTestId('layout-board');
+              const preview = page.getByTestId('placement-preview');
+              const status = page.getByTestId('placement-status');
+              const placed = page.getByTestId('placed-fixture');
+              await palette.waitFor();
+              const original = await placed.first().boundingBox();
+              assert.equal(await placed.count(), 1);
+              async function drag(x, y) {
+                const from = await palette.boundingBox();
+                const target = await board.boundingBox();
+                await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+                await page.mouse.down();
+                await page.mouse.move(target.x + target.width * x / 5000, target.y + target.height * y / 2000, { steps: 8 });
+                await preview.waitFor();
+              }
+              async function invalid(x, y, reason, screenshot) {
+                await drag(x, y);
+                assert.equal(await preview.getAttribute('data-valid'), 'false');
+                assert.match(await status.innerText(), reason);
+                if (screenshot) await page.screenshot({ path: 'evidence/invalid-preview.png' });
+                await page.mouse.up();
+                await preview.waitFor({ state: 'detached' });
+                assert.equal(await placed.count(), 1);
+                assert.deepEqual(await placed.first().boundingBox(), original);
+              }
+              await invalid(1100, 600, /碰撞|重叠/, true);
+              await invalid(3100, 150, /净空|开口/);
+              await invalid(4800, 1850, /越界|超出/);
+              await drag(200, 1100);
+              assert.equal(await preview.getAttribute('data-valid'), 'true');
+              const opacity = await preview.evaluate((el) => Number(getComputedStyle(el).opacity));
+              assert.ok(opacity > 0 && opacity < 0.7, 'preview must be translucent');
+              await page.screenshot({ path: 'evidence/valid-preview.png' });
+              await page.mouse.up();
+              await preview.waitFor({ state: 'detached' });
+              assert.equal(await placed.count(), 2);
+              assert.deepEqual(await placed.first().boundingBox(), original);
+              await drag(4000, 1000);
+              await page.keyboard.press('Escape');
+              await preview.waitFor({ state: 'detached' });
+              await page.mouse.up();
+              assert.equal(await placed.count(), 2);
+              await palette.focus();
+              await page.keyboard.press('Space');
+              await preview.waitFor();
+              await page.keyboard.press('ArrowRight');
+              await page.keyboard.press('Space');
+              await preview.waitFor({ state: 'detached' });
+              assert.equal(await placed.count(), 3);
+              assert.deepEqual(await placed.first().boundingBox(), original);
+              await page.screenshot({ path: 'evidence/after-drop.png' });
+              console.log('GREEN: collision, opening clearance, bounds, valid drop, Escape and keyboard; original furniture position preserved.');
+            } finally { await browser.close(); }
+          }
+          main().catch((error) => { console.error(error); process.exitCode = 1; });
+          TEST
+          start() {
+            (cd project && npm run dev -- --host 127.0.0.1 --port 4173) > evidence/server.log 2>&1 &
+            server=$!
+            for attempt in {1..40}; do
+              if curl -s --max-time 2 http://127.0.0.1:4173/ >/dev/null; then return; fi
+              sleep 1
+            done
+            cat evidence/server.log
+            return 1
+          }
+          start
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          node browser.cjs baseline
+          cp -R candidate/app/interior-layout project/app/
+          node browser.cjs candidate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: l03-browser-evidence
+          path: evidence/
