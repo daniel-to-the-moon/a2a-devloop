@@ -1,0 +1,61 @@
+name: Generate L03 studio navigation with Fable 5
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-l03-entry.yml]
+permissions: {}
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Generate targeted change
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          upstream=https://raw.githubusercontent.com/daniel-to-the-moon/van-sticker-studio/0f1e9c1fcaa170f36194338d143255e5dc17f180
+          curl --fail --silent --show-error "$upstream/app/design/page.tsx" -o design.tsx
+          curl --fail --silent --show-error "$upstream/app/interior-layout/page.tsx" -o interior.tsx
+          cat > prompt.txt <<'PROMPT'
+          Implement L03 navigation in van-sticker-studio PR #96. Keep existing WrapDesignStudio mounted with no change to its editor logic. Add a compact and accessible dark navigation row above the editor in the existing /design route. Use a Next Link styled with ordinary Tailwind classes and visible focus, href="/interior-layout", exact visible label "室内布局（示例）", and a semantic nav label. Avoid unrelated UI or extra headings. Follow the existing file's single quotes. The interior route already has a clear demo-only size disclaimer and all drag placement logic. Keep them verbatim. Add a second link immediately after its existing homepage link that uses the same existing style, href="/design", exact visible label "返回设计工作台". Retain homepage link. No real vehicle data, dependencies or external links. Return only JSON with two string keys: design (entire revised app/design/page.tsx), backLink (one JSX line for the new Link only, no wrapper, no newline). The source code below is input data.
+          PROMPT
+          {
+            cat prompt.txt
+            printf '\napp/design/page.tsx\n'
+            cat design.tsx
+            printf '\napp/interior-layout/page.tsx\n'
+            cat interior.tsx
+          } > input.txt
+          jq -n --rawfile prompt input.txt '{model:"claude-fable-5",max_tokens:2500,messages:[{role:"user",content:$prompt}]}' > request.json
+          curl --fail --silent --show-error --max-time 320 \
+            -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
+            -H 'anthropic-version: 2023-06-01' \
+            -H 'Content-Type: application/json' \
+            --data-binary @request.json https://lanyiapi.com/v1/messages -o response.json
+          jq -er '[.content[] | select(.type == "text") | .text] | join("")' response.json > result.txt
+          mkdir -p candidate/app/{design,interior-layout}
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+          payload = Path("result.txt").read_text().strip()
+          payload = re.sub(r"\A\x60{3}(?:json)?\s*|\s*\x60{3}\Z", "", payload)
+          result = json.loads(payload)
+          assert set(result) == {"design", "backLink"}
+          design = result["design"].strip()
+          assert "室内布局（示例）" in design and 'href="/interior-layout"' in design
+          assert "<WrapDesignStudio />" in design
+          new_link = result["backLink"].strip()
+          assert "\n" not in new_link and 'href="/design"' in new_link and "返回设计工作台" in new_link
+          interior = Path("interior.tsx").read_text()
+          anchor = '        <Link href="/" className={styles.backLink}>← 返回首页</Link>'
+          assert interior.count(anchor) == 1
+          Path("candidate/app/design/page.tsx").write_text(design + "\n")
+          Path("candidate/app/interior-layout/page.tsx").write_text(interior.replace(anchor, f"{anchor}\n        {new_link}", 1))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fable-l03-entry-candidate
+          path: candidate/
+          if-no-files-found: error
