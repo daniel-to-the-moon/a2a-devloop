@@ -11,12 +11,12 @@ jobs:
     steps:
       - name: Verify one Anthropic Messages response
         env:
-          LANYI_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LANYI_KEY: ${{ secrets.ANTHROPIC_AUTH_TOKEN || secrets.ANTHROPIC_API_KEY }}
         shell: bash
         run: |
           set -eu
           if [ -z "$LANYI_KEY" ]; then
-            echo "::error::Repository secret ANTHROPIC_API_KEY is unavailable."
+            echo "::error::Neither ANTHROPIC_AUTH_TOKEN nor ANTHROPIC_API_KEY is available to the runner."
             exit 1
           fi
           response="$(mktemp)"
