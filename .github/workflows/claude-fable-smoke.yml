@@ -1,0 +1,33 @@
+name: Claude Fable-5 connectivity smoke
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/claude-fable-smoke.yml]
+permissions: {}
+jobs:
+  messages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Verify one Anthropic Messages response
+        env:
+          LANYI_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        shell: bash
+        run: |
+          set -eu
+          if [ -z "$LANYI_KEY" ]; then
+            echo "::error::Repository secret ANTHROPIC_API_KEY is unavailable."
+            exit 1
+          fi
+          response="$(mktemp)"
+          trap 'rm -f "$response"' EXIT
+          code="$(curl --silent --show-error --max-time 45 --output "$response" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $LANYI_KEY" \
+            --header 'anthropic-version: 2023-06-01' \
+            --header 'content-type: application/json' \
+            --data '{"model":"claude-fable-5","max_tokens":32,"messages":[{"role":"user","content":"Reply with only OK."}]}' \
+            https://lanyiapi.com/v1/messages)"
+          echo "Anthropic Messages status: $code"
+          test "$code" = 200
+          jq -e '.type == "message" and ([.content[]? | select(.type == "text") | .text | test("^\\s*OK[.!]?\\s*$";"i")] | any)' "$response" >/dev/null
+          jq -r 'if .model == "claude-fable-5" then "Response model matches requested ID." else "Response reports a different model ID; check gateway mapping." end' "$response"
