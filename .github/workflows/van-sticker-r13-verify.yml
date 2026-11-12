@@ -205,7 +205,9 @@ jobs:
                 await page.locator('.wrap-preview-views').getByRole('button', { name: side.view, exact: true }).click();
                 await page.waitForTimeout(2400);
                 const file = 'evidence/after-' + side.key + '-3d-paint.png';
-                await rendered.screenshot({ path: file });
+                const clip = await rendered.boundingBox();
+                assert.ok(clip && clip.width > 0 && clip.height > 0, side.key + ' canvas has no capture area');
+                await page.screenshot({ path: file, clip, timeout: 60000 });
                 const painted = await image(file);
                 assert.ok(redCount(painted) > 450, side.key + ' film was not rendered by the actual 3D shader');
                 assertBitmapDirection(painted, '3D ' + side.key);
