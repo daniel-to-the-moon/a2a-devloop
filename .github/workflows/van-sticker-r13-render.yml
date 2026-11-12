@@ -1,0 +1,42 @@
+name: Render the R13 projection artifact from the pinned source
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-r13-render.yml]
+permissions: {}
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Generate guides from the actual R13 mesh
+        run: |
+          set -euo pipefail
+          source=5a779fbc138e25ad2ec8f4f23a353e292bc4dbf8
+          git init -q project
+          git -C project fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git "$source"
+          git -C project checkout -q --detach "$source"
+          npm --prefix project ci --ignore-scripts
+          mkdir -p evidence
+          printf '%s\n' "$source" > evidence/source.txt
+          (cd project && node --experimental-strip-types tools/generate-wrap-guides.ts)
+          cmp <(git -C project show HEAD:public/model/mxgarage-rv.glb) project/public/model/mxgarage-rv.glb
+          cp project/lib/wrap-guides.json evidence/
+          python - <<'PY'
+          import base64, json
+          from pathlib import Path
+          evidence = Path('evidence')
+          data = json.loads((evidence/'wrap-guides.json').read_text())
+          assert data['sha256'] == '78bc638b15e2fe69d822790784fef9e84dd453574c78b984957ec4d365b19f13'
+          for side in ('entry','driver'):
+              for field in ('image','mask'):
+                  (evidence/f'{side}-{field}.png').write_bytes(base64.b64decode(data[side][field].split(',')[1]))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r13-orthographic-guide-files
+          path: evidence/
+          if-no-files-found: error
