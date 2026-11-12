@@ -22,7 +22,9 @@ jobs:
       - name: Install project and Chromium
         run: |
           set -euo pipefail
-          git clone --quiet --depth 1 --branch feature/44-interior-placement https://github.com/daniel-to-the-moon/van-sticker-studio.git project
+          git init -q project
+          git -C project fetch --quiet --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git 096c613636c0b48b67bcf1e0785d67acd99d9086
+          git -C project checkout -q --detach FETCH_HEAD
           test "$(git -C project rev-parse HEAD)" = 096c613636c0b48b67bcf1e0785d67acd99d9086
           python3 - <<'PY'
           from pathlib import Path
@@ -129,8 +131,17 @@ jobs:
           }
           main().catch((error) => { console.error(error); process.exitCode = 1; });
           TEST
+          cat > project/vite.l03-browser.config.ts <<'CONFIG'
+          import { defineConfig } from 'vite';
+          import vinext from 'vinext';
+          import tailwindcss from '@tailwindcss/postcss';
+          export default defineConfig({
+            css: { postcss: { plugins: [tailwindcss()] } },
+            plugins: [vinext()],
+          });
+          CONFIG
           start() {
-            (cd project && npm run dev -- --host localhost --port "$1") > "evidence/server-$1.log" 2>&1 &
+            (cd project && ./node_modules/.bin/vite --config vite.l03-browser.config.ts --host localhost --port "$1" --strictPort) > "evidence/server-$1.log" 2>&1 &
             server=$!
             for attempt in {1..40}; do
               if curl -s --noproxy "*" --max-time 5 "http://localhost:$1/interior-layout" >/dev/null; then return; fi
