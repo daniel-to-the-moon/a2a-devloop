@@ -1,0 +1,228 @@
+name: Verify both R13 side projections and decals in Chromium
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-r13-verify.yml]
+permissions: {}
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Capture comparable R13 workbench views
+        run: |
+          set -euo pipefail
+          base=244009e344e0c326495471a175959fada037cef3
+          head=b04d1532c4c7dbe4d0c367f17d3a5db7dcb10045
+          repo=https://github.com/daniel-to-the-moon/van-sticker-studio.git
+          mkdir -p evidence
+          git init -q app-base
+          git -C app-base fetch -q --depth 1 "$repo" "$base" "$head"
+          git -C app-base checkout -q --detach "$base"
+          git -C app-base worktree add --detach ../app-head "$head"
+          cmp app-base/package-lock.json app-head/package-lock.json
+          cmp app-base/public/model/mxgarage-rv.glb app-head/public/model/mxgarage-rv.glb
+          printf 'base=%s\nhead=%s\n' "$base" "$head" > evidence/revisions.txt
+          sha256sum app-{base,head}/public/model/mxgarage-rv.glb >> evidence/revisions.txt
+          npm --prefix app-base ci --ignore-scripts
+          cp -a app-base/node_modules app-head/node_modules
+          npm install --prefix "$RUNNER_TEMP/r13-visual" --no-audit --no-fund playwright@1.56.1
+          "$RUNNER_TEMP/r13-visual/node_modules/.bin/playwright" install --with-deps chromium
+          cat > verify.cjs <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { chromium } = require(process.env.RUNNER_TEMP + '/r13-visual/node_modules/playwright');
+          const sharp = require(path.resolve('app-base/node_modules/sharp'));
+          const label = process.argv[2];
+          const url = 'http://localhost:4173';
+          const sides = [
+            { key: 'entry', edit: '入口侧', view: '入口正侧面' },
+            { key: 'driver', edit: '另一侧', view: '另一侧' },
+          ];
+          async function image(file) {
+            return sharp(file).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+          }
+          function redCount({ data }) {
+            let count = 0;
+            for (let i = 0; i < data.length; i += 4)
+              if (data[i] > 100 && data[i] > data[i + 1] * 1.6 && data[i] > data[i + 2] * 1.1) count++;
+            return count;
+          }
+          function pixel({ data, info }, x, y) {
+            const i = (Math.floor(y * info.height) * info.width + Math.floor(x * info.width)) * 4;
+            return [...data.subarray(i, i + 4)];
+          }
+          async function dimensions(canvas) {
+            return canvas.evaluate((svg) => {
+              const box = svg.getBoundingClientRect();
+              return { width: box.width, height: box.height, zoom: svg.viewBox.baseVal.width };
+            });
+          }
+          function assertRatio(measured) {
+            assert.ok(measured.width > 0 && measured.height > 0);
+            assert.ok(Math.abs(measured.width / measured.height - 5.8 / 3.05) < 0.015, JSON.stringify(measured));
+          }
+          async function main() {
+            const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
+            try {
+              const page = await browser.newPage({ viewport: { width: 1400, height: 1100 }, deviceScaleFactor: 1 });
+              const shaderErrors = [];
+              page.on('console', (message) => {
+                if (/Shader Error|VALIDATE_STATUS|shader compile/i.test(message.text())) shaderErrors.push(message.text());
+              });
+              await page.goto(url + '/design');
+              await page.getByText('正在恢复草稿', { exact: true }).waitFor({ state: 'hidden', timeout: 15000 });
+              const canvas = page.locator('svg.wrap-canvas');
+              await canvas.waitFor();
+              const shots = {};
+              for (const side of sides) {
+                await page.locator('.wrap-segment').getByRole('button', { name: side.edit, exact: true }).click();
+                const frame = await dimensions(canvas);
+                assert.equal(frame.zoom, 1000);
+                if (label === 'after') assertRatio(frame);
+                const file = 'evidence/' + label + '-' + side.key + '.png';
+                await canvas.screenshot({ path: file });
+                shots[side.key] = file;
+              }
+              await page.goto(url + '/?drawing-export=1');
+              await page.waitForFunction(() => {
+                try { return window.__drawingExport?.exportDrawing('entry').dataUrl.startsWith('data:image/png;base64,'); }
+                catch { return false; }
+              }, null, { timeout: 30000, polling: 1200 });
+              const drawing = await page.evaluate(() => window.__drawingExport.exportDrawing('entry').dataUrl);
+              fs.writeFileSync('evidence/' + label + '-reference-entry.png', Buffer.from(drawing.split(',')[1], 'base64'));
+              await page.goto(url + '/design');
+              await page.getByText('正在恢复草稿', { exact: true }).waitFor({ state: 'hidden', timeout: 15000 });
+              await page.setViewportSize({ width: 1920, height: 790 });
+              const wide = await dimensions(canvas);
+              await page.setViewportSize({ width: 390, height: 844 });
+              const narrow = await dimensions(canvas);
+              fs.writeFileSync('evidence/' + label + '-viewport.json', JSON.stringify({ wide, narrow }) + '\n');
+              if (label === 'before') return;
+              assertRatio(wide);
+              assertRatio(narrow);
+              await canvas.screenshot({ path: 'evidence/after-mobile-entry.png' });
+              await page.setViewportSize({ width: 1400, height: 1100 });
+              const landmarks = JSON.parse(fs.readFileSync('landmarks.json', 'utf8'));
+              const art = {
+                kind: 'region', x: .22, y: .24, w: .73, h: .42, rotation: 0,
+                color: '#ef2155', text: '', font: 'sans', icon: 'cup', src: '',
+                thickness: .006, dashed: false, visible: true, locked: false,
+                points: [{x:0,y:0},{x:1,y:0},{x:1,y:.84},{x:.80,y:1},{x:0,y:.84}],
+              };
+              const draft = { version: 1, background: '#f3eedf', layers: [{
+                id: 'projection-check', name: '侧视贴膜验收', linked: false, entry: art, driver: { ...art, color: '#f44510' },
+              }] };
+              await page.getByLabel('导入草稿').setInputFiles({
+                name: 'r13-side-projection-test.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(draft)),
+              });
+              await page.getByText('已导入，可撤销恢复之前的设计', { exact: true }).waitFor();
+              for (const side of sides) {
+                await page.locator('.wrap-segment').getByRole('button', { name: side.edit, exact: true }).click();
+                const file = 'evidence/after-' + side.key + '-paint.png';
+                await canvas.screenshot({ path: file });
+                const before = await image(shots[side.key]);
+                const after = await image(file);
+                assert.ok(redCount(after) > 2000, side.key + ' contains no rendered 2D film');
+                for (const mark of landmarks[side.key]) {
+                  assert.ok(mark.x >= art.x && mark.x <= art.x + art.w && mark.y >= art.y && mark.y <= art.y + art.h, mark.name + ' not covered by the film test');
+                  assert.deepEqual(pixel(after, mark.x, mark.y), pixel(before, mark.x, mark.y), mark.name + ' was painted over in 2D');
+                }
+              }
+              const layer = canvas.locator('[data-layer="projection-check"] > g');
+              const oldTransform = await layer.getAttribute('transform');
+              const box = await canvas.boundingBox();
+              const probe = await canvas.evaluate((svg) => {
+                const rect = svg.getBoundingClientRect();
+                for (const y of [.61,.59,.57,.54]) {
+                  for (const x of [.43,.48,.55,.60,.67,.76]) {
+                    const p = [rect.left + x * rect.width, rect.top + y * rect.height];
+                    if (document.elementFromPoint(...p)?.closest('[data-layer="projection-check"]')) return p;
+                  }
+                }
+                return null;
+              });
+              assert.ok(box && probe, 'the visible film has no pointer target');
+              await page.mouse.move(...probe);
+              await page.mouse.down();
+              await page.mouse.move(probe[0] + box.width * .02, probe[1], { steps: 8 });
+              await page.mouse.up();
+              await page.waitForFunction((original) => document.querySelector('[data-layer="projection-check"] > g').getAttribute('transform') !== original, oldTransform);
+              await page.getByRole('button', { name: '放大', exact: true }).click();
+              assert.ok((await dimensions(canvas)).zoom < 1000);
+              await page.getByRole('button', { name: '适合画布', exact: true }).click();
+              assert.equal((await dimensions(canvas)).zoom, 1000);
+              const asset = page.waitForResponse((res) => new URL(res.url()).pathname === '/model/mxgarage-rv.glb' && res.ok(), { timeout: 25000 });
+              await page.getByRole('button', { name: '3D 预览', exact: true }).click();
+              await asset;
+              const rendered = page.locator('.wrap-preview canvas');
+              await rendered.waitFor();
+              for (const side of sides) {
+                await page.locator('.wrap-preview-views').getByRole('button', { name: side.view, exact: true }).click();
+                await page.waitForTimeout(2400);
+                const file = 'evidence/after-' + side.key + '-3d-paint.png';
+                await rendered.screenshot({ path: file });
+                assert.ok(redCount(await image(file)) > 450, side.key + ' film was not rendered by the actual 3D shader');
+              }
+              assert.deepEqual(shaderErrors, []);
+              console.log('PASS: both sides at 100%, wide and mobile proportions, real glass probes, film drag/zoom and both 3D textures.');
+            } finally {
+              await browser.close();
+            }
+          }
+          main().catch((error) => { console.error(error); process.exitCode = 1; });
+          JS
+          cat > app-head/.r13-landmarks.mjs <<'JS'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { Box3, Vector3 } from 'three';
+          import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+          import { createSideProjection, projectSidePoint } from './lib/wrap-side-projection.ts';
+          const meta = JSON.parse(fs.readFileSync('public/model/motion_metadata.json', 'utf8'));
+          const raw = fs.readFileSync('public/model/mxgarage-rv.glb');
+          const { scene } = await new GLTFLoader().parseAsync(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength), '');
+          scene.updateMatrixWorld(true);
+          const frame = createSideProjection({ xMin: meta.wrap.xMin, length: meta.wrap.xSpan, height: meta.wrap.zSpan });
+          const groups = {
+            entry: ['EntryDoor', 'Window_1', 'Window_2'],
+            driver: ['Window_3', 'Window_4'],
+          };
+          const marks = Object.fromEntries(Object.entries(groups).map(([side, names]) => [side, names.map((name) => {
+            const mesh = scene.getObjectByName('RV_WebRig_' + name + '_Glass');
+            assert.ok(mesh, name);
+            const { x, y } = new Box3().setFromObject(mesh, true).getCenter(new Vector3());
+            return { name, ...projectSidePoint(frame, x, y) };
+          })]));
+          console.log(JSON.stringify(marks));
+          JS
+          (cd app-head && node --experimental-strip-types .r13-landmarks.mjs) > landmarks.json
+          cp landmarks.json evidence/landmarks.json
+          start() {
+            (cd "$1" && exec ./node_modules/.bin/vinext dev --host localhost --port 4173 --strictPort) > "evidence/$1.log" 2>&1 &
+            pid=$!
+            for attempt in {1..35}; do
+              if curl -fsS --noproxy "*" --max-time 5 http://localhost:4173/design >/dev/null 2>&1; then return; fi
+              sleep 1
+            done
+            cat "evidence/$1.log"
+            return 1
+          }
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          start app-base
+          node verify.cjs before
+          kill "$pid"
+          wait "$pid" || true
+          start app-head
+          node verify.cjs after
+          cmp evidence/before-reference-entry.png evidence/after-reference-entry.png
+          cat evidence/revisions.txt evidence/{before,after}-viewport.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: r13-two-side-browser-evidence
+          path: evidence/
+          if-no-files-found: error
