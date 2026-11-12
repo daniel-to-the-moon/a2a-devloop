@@ -37,7 +37,16 @@ jobs:
           s = s.replace('          setStatusMessage(REASON_LABELS[result.reason] || "放置失败");\n        }\n      }\n    } else if', '          setPreview(null);\n          setKeyboardMode(false);\n          setStatusMessage(REASON_LABELS[result.reason] || "放置失败");\n        }\n      }\n    } else if')
           s = s.replace('        <div className={styles.envelope}>', '        <div ref={boardRef} className={styles.envelope}>').replace('        ref={boardRef}\n', '')
           s = s.replace('key={index}', 'key={`${fixture.x}:${fixture.y}`}').replace('placedFixtures.map((fixture, index)', 'placedFixtures.map((fixture)')
+          s = s.replace('        role="img"\n', '').replace('        aria-label={\x60布局平面图，尺寸 \x24{ENVELOPE_WIDTH} × \x24{ENVELOPE_HEIGHT} 毫米\x60}\n', '')
+          s = s.replace('<div\n        data-testid="placement-status"', '<output\n        data-testid="placement-status"').replace('        role="status"\n','').replace('{statusMessage}\n      </div>', '{statusMessage}\n      </output>')
+          s = s.replace('  const boardRef =', '  const paletteRef = useRef<HTMLButtonElement>(null);\n  const boardRef =')
+          s = s.replace('  const clearPreview = useCallback(() => {\n    activePointerIdRef.current = null;', '  const clearPreview = useCallback(() => {\n    const pointerId = activePointerIdRef.current;\n    const palette = paletteRef.current;\n    activePointerIdRef.current = null;\n    if (pointerId !== null && palette?.hasPointerCapture(pointerId)) {\n      palette.releasePointerCapture(pointerId);\n    }')
+          s = s.replace('    return () => window.removeEventListener("keydown", handleEscape);', '    const handleHidden = () => {\n      if (document.hidden) clearPreview();\n    };\n    window.addEventListener("blur", clearPreview);\n    document.addEventListener("visibilitychange", handleHidden);\n    return () => {\n      window.removeEventListener("keydown", handleEscape);\n      window.removeEventListener("blur", clearPreview);\n      document.removeEventListener("visibilitychange", handleHidden);\n    };')
+          s = s.replace('          data-testid="fixture-palette"', '          ref={paletteRef}\n          onBlur={() => { if (keyboardMode) clearPreview(); }}\n          data-testid="fixture-palette"')
           file.write_text('\n'.join(line.rstrip() for line in s.splitlines()) + '\n')
+          css = file.with_name('layout.module.css')
+          c = css.read_text().replace('  overflow: hidden;\n','').replace('.envelope {\n  position:', '.envelope {\n  border-radius: inherit;\n  position:').replace('.status {\n', '.status {\n  display: block;\n').replace('.preview {\n', '.preview {\n  z-index: 1;\n')
+          css.write_text(c)
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -103,6 +112,21 @@ jobs:
               await invalid(1100, 600, /碰撞|重叠|冲突/, true);
               await invalid(3100, 150, /净空|开口/);
               await invalid(4800, 1850, /越界|超出/);
+              await drag(5100, 1500);
+              assert.equal(await preview.getAttribute('data-valid'), 'false');
+              assert.match(await status.innerText(), /越界|超出/);
+              const outside = await preview.boundingBox();
+              const layout = await board.boundingBox();
+              assert.ok(outside.x > layout.x + layout.width);
+              assert.equal(await preview.evaluate((el) => {
+                for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+                  if (getComputedStyle(parent).overflowX === 'hidden') return false;
+                }
+                return true;
+              }), true);
+              await page.mouse.up();
+              await preview.waitFor({ state: 'detached' });
+              assert.equal(await placed.count(), 1);
               await drag(200, 1100);
               assert.equal(await preview.getAttribute('data-valid'), 'true');
               const opacity = await preview.evaluate((el) => Number(getComputedStyle(el).opacity));
@@ -120,28 +144,27 @@ jobs:
               await palette.focus();
               await page.keyboard.press('Space');
               await preview.waitFor();
+              await page.keyboard.press('Tab');
+              await preview.waitFor({ state: 'detached' });
+              assert.equal(await placed.count(), 2);
+              await palette.focus();
+              await page.keyboard.press('Space');
+              await preview.waitFor();
               await page.keyboard.press('ArrowRight');
               await page.keyboard.press('Space');
               await preview.waitFor({ state: 'detached' });
               assert.equal(await placed.count(), 3);
               assert.deepEqual(await placed.first().boundingBox(), original);
               await page.screenshot({ path: 'evidence/after-drop.png' });
-              console.log('GREEN: collision, opening clearance, bounds, valid drop, Escape and keyboard; original furniture position preserved.');
+              console.log('GREEN: collision, opening clearance, bounds, outside-board preview, valid drop, Escape, keyboard blur and keyboard placement; original furniture position preserved.');
             } finally { await browser.close(); }
           }
           main().catch((error) => { console.error(error); process.exitCode = 1; });
           TEST
-          cat > project/vite.l03-browser.config.ts <<'CONFIG'
-          import { defineConfig } from 'vite';
-          import vinext from 'vinext';
-          import tailwindcss from '@tailwindcss/postcss';
-          export default defineConfig({
-            css: { postcss: { plugins: [tailwindcss()] } },
-            plugins: [vinext()],
-          });
-          CONFIG
+          cp -a project project-candidate
+          cp -R candidate/app/interior-layout project-candidate/app/
           start() {
-            (cd project && ./node_modules/.bin/vite --config vite.l03-browser.config.ts --host localhost --port "$1" --strictPort) > "evidence/server-$1.log" 2>&1 &
+            (cd "$2" && exec ./node_modules/.bin/vinext dev --host localhost --port "$1") > "evidence/server-$1.log" 2>&1 &
             server=$!
             for attempt in {1..40}; do
               if curl -s --noproxy "*" --max-time 5 "http://localhost:$1/interior-layout" >/dev/null; then return; fi
@@ -150,12 +173,11 @@ jobs:
             cat "evidence/server-$1.log"
             return 1
           }
-          start 4173
+          start 4173 project
           trap 'kill "$server" 2>/dev/null || true' EXIT
           node browser.cjs baseline
           kill "$server" 2>/dev/null || true
-          cp -R candidate/app/interior-layout project/app/
-          start 4174
+          start 4174 project-candidate
           node browser.cjs candidate
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
