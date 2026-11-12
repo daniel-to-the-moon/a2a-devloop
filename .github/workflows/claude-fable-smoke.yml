@@ -29,6 +29,9 @@ jobs:
             --data '{"model":"claude-fable-5","max_tokens":32,"messages":[{"role":"user","content":"Reply with only OK."}]}' \
             "https://$host/v1/messages")"
             echo "$host Anthropic Messages status: $code"
+            if [ "$code" != 200 ]; then
+              jq -r '(.error.code // .error.type // "unknown") as $value | if ($value | type) == "string" and ($value | test("^[a-z][a-z0-9_]{0,48}$")) then "Gateway error code: " + $value else "Gateway error code unavailable" end' "$response" 2>/dev/null || true
+            fi
             case "$code" in
               502|503|504) continue ;;
               *) break ;;
