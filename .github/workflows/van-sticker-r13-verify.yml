@@ -16,7 +16,7 @@ jobs:
         run: |
           set -euo pipefail
           base=244009e344e0c326495471a175959fada037cef3
-          head=b04d1532c4c7dbe4d0c367f17d3a5db7dcb10045
+          head=7a5c716fbb5dd94fd3518cba0ea50456b9daacee
           repo=https://github.com/daniel-to-the-moon/van-sticker-studio.git
           mkdir -p evidence
           git init -q app-base
@@ -114,13 +114,23 @@ jobs:
                 thickness: .006, dashed: false, visible: true, locked: false,
                 points: [{x:0,y:0},{x:1,y:0},{x:1,y:.84},{x:.80,y:1},{x:0,y:.84}],
               };
+              await page.waitForFunction(() => {
+                const input = document.querySelector('input[aria-label="导入草稿"]');
+                return input && Object.keys(input).some((key) => key.startsWith('__reactProps'));
+              });
               const draft = { version: 1, background: '#f3eedf', layers: [{
                 id: 'projection-check', name: '侧视贴膜验收', linked: false, entry: art, driver: { ...art, color: '#f44510' },
               }] };
               await page.getByLabel('导入草稿').setInputFiles({
                 name: 'r13-side-projection-test.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(draft)),
               });
-              await page.getByText('已导入，可撤销恢复之前的设计', { exact: true }).waitFor();
+              try {
+                await canvas.locator('[data-layer="projection-check"]').waitFor({ state: 'attached', timeout: 10000 });
+              } catch (error) {
+                console.error('Draft status', await page.locator('.wrap-message').allTextContents());
+                await page.screenshot({ path: 'evidence/draft-import-failure.png' });
+                throw error;
+              }
               for (const side of sides) {
                 await page.locator('.wrap-segment').getByRole('button', { name: side.edit, exact: true }).click();
                 const file = 'evidence/after-' + side.key + '-paint.png';
