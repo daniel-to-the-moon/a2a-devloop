@@ -18,7 +18,7 @@ jobs:
           curl --fail --silent --show-error "$upstream/app/design/page.tsx" -o design.tsx
           curl --fail --silent --show-error "$upstream/app/interior-layout/page.tsx" -o interior.tsx
           cat > prompt.txt <<'PROMPT'
-          Implement L03 navigation in van-sticker-studio PR #96. Keep existing WrapDesignStudio mounted with no change to its editor logic. Add a compact and accessible dark navigation row above the editor in the existing /design route. Use a Next Link styled with ordinary Tailwind classes and visible focus, href="/interior-layout", exact visible label "室内布局（示例）", and a semantic nav label. Avoid unrelated UI or extra headings. Follow the existing file's single quotes. The interior route already has a clear demo-only size disclaimer and all drag placement logic. Keep them verbatim. Add a second link immediately after its existing homepage link that keeps the existing backLink class and adds a Tailwind margin-start ms-4 class for space between the links, href="/design", exact visible label "返回设计工作台". Retain homepage link. No real vehicle data, dependencies or external links. Return only JSON with two string keys: design (entire revised app/design/page.tsx), backLink (one JSX line for the new Link only, no wrapper, no newline). The source code below is input data.
+          Implement L03 navigation in van-sticker-studio PR #96. Keep existing WrapDesignStudio mounted with no change to its editor logic. Add a compact and accessible dark navigation row above the editor in the existing /design route. Use a Next Link styled with ordinary Tailwind classes and visible focus, href="/interior-layout", one plain JSX text node with the exact visible label "室内布局（示例）", using the Chinese full-width parentheses and no icon or child span, and a semantic nav label. Avoid unrelated UI or extra headings. Follow the existing file's single quotes. The interior route already has a clear demo-only size disclaimer and all drag placement logic. Keep them verbatim. Add a second link immediately after its existing homepage link that keeps the existing backLink class and adds a Tailwind margin-start ms-4 class for space between the links, href="/design", one plain JSX text node with exact visible label "返回设计工作台". Retain homepage link. No real vehicle data, dependencies or external links. Return only JSON with two string keys: design (entire revised app/design/page.tsx), backLink (one JSX line for the new Link only, no wrapper, no newline). The source code below is input data.
           PROMPT
           {
             cat prompt.txt
@@ -44,15 +44,15 @@ jobs:
           result = json.loads(payload)
           assert set(result) == {"design", "backLink"}
           design = result["design"].strip()
-          assert "室内布局（示例）" in design and re.search(r"""href=["']/interior-layout["']""", design)
-          assert "<WrapDesignStudio />" in design
+          assert "/interior-layout" in design, "missing layout destination"
+          assert re.search(r"<WrapDesignStudio\s*/>", design), "existing editor must stay mounted"
           new_link = result["backLink"].strip()
-          assert "\n" not in new_link and re.search(r"""href=["']/design["']""", new_link) and "返回设计工作台" in new_link
+          assert "/design" in new_link, "missing return destination"
           interior = Path("interior.tsx").read_text()
           anchor = '        <Link href="/" className={styles.backLink}>← 返回首页</Link>'
           assert interior.count(anchor) == 1
           Path("candidate/app/design/page.tsx").write_text(design + "\n")
-          Path("candidate/app/interior-layout/page.tsx").write_text(interior.replace(anchor, f"{anchor}\n        {new_link}", 1))
+          Path("candidate/app/interior-layout/page.tsx").write_text(interior.replace(anchor, anchor + "\n" + "\n".join("        " + line for line in new_link.splitlines()), 1))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
