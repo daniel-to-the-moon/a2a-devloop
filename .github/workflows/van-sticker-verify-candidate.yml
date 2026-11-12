@@ -1,0 +1,43 @@
+name: Verify Van Sticker Studio candidate
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-verify-candidate.yml]
+permissions:
+  actions: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: interior-placement-candidate
+          path: candidate
+          github-token: ${{ github.token }}
+          run-id: 43246352513
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Normalize test registration and check regression
+        run: |
+          set -euo pipefail
+          sed -i 's/^test(/void test(/' candidate/tests/interior-placement.test.ts
+          sed -i 's/candidate as unknown as Fixture, envelope, \[existing/candidate, envelope, [existing/' candidate/tests/interior-placement.test.ts
+          python3 - <<'PY'
+          from pathlib import Path
+          for path in Path('candidate').rglob('*.ts'):
+              path.write_text(path.read_text().rstrip() + '\n')
+          PY
+          cp -r candidate mutant
+          sed -i '/if (!isFiniteRect(clearance)) {/,/^    }$/d' mutant/lib/interior-placement.ts
+          if node --experimental-strip-types --test --test-name-pattern='reject clearance with overflow' mutant/tests/interior-placement.test.ts > red.log 2>&1; then
+            cat red.log
+            exit 1
+          fi
+          grep -E 'not ok.*reject clearance with overflow' red.log
+          node --experimental-strip-types --test candidate/tests/interior-placement.test.ts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-interior-placement
+          path: candidate/
+          if-no-files-found: error
