@@ -43,6 +43,7 @@ jobs:
               await editor.waitFor({ timeout: 15000 });
               const entry = page.getByRole('link', { name: '室内布局（示例）', exact: true });
               await entry.waitFor();
+              await page.getByText('正在恢复草稿', { exact: true }).waitFor({ state: 'hidden', timeout: 15000 });
               await page.screenshot({ path: 'evidence/studio-entry.png', timeout: 15000 });
               await Promise.all([page.waitForURL('**/interior-layout'), entry.click()]);
               await page.getByRole('heading', { name: '室内布局草图', exact: true }).waitFor();
@@ -139,6 +140,33 @@ jobs:
               await Promise.all([page.waitForURL('**/design'), back.click()]);
               await editor.waitFor({ timeout: 15000 });
               await entry.waitFor();
+              await page.getByText('正在恢复草稿', { exact: true }).waitFor({ state: 'hidden', timeout: 15000 });
+              await page.getByRole('button', { name: '另一侧', exact: true }).click();
+              assert.equal(await page.getByRole('button', { name: '另一侧', exact: true }).getAttribute('aria-pressed'), 'true');
+              await page.getByRole('button', { name: '咖啡杯', exact: true }).click();
+              await page.getByRole('heading', { name: '图层 · 1', exact: true }).waitFor();
+              const narrow = await browser.newPage({ viewport: { width: 390, height: 844 } });
+              await narrow.goto('http://localhost:4173/design');
+              const narrowEntry = narrow.getByRole('link', { name: '室内布局（示例）', exact: true });
+              await narrowEntry.waitFor();
+              await narrow.keyboard.press('Tab');
+              assert.equal(await narrowEntry.evaluate((el) => document.activeElement === el && getComputedStyle(el).boxShadow !== 'none'), true);
+              await Promise.all([narrow.waitForURL('**/interior-layout'), narrow.keyboard.press('Enter')]);
+              const home = narrow.getByRole('link', { name: '返回首页' });
+              const backOnNarrow = narrow.getByRole('link', { name: '返回设计工作台' });
+              const warning = narrow.getByText('交互示例：尺寸仅用于演示，非实际车辆测量数据', { exact: true });
+              await warning.waitFor();
+              for (const element of [home, backOnNarrow, warning]) {
+                const rect = await element.boundingBox();
+                assert.ok(rect && rect.x >= 0 && rect.x + rect.width <= 390);
+              }
+              await home.focus();
+              await narrow.keyboard.press('Tab');
+              assert.equal(await backOnNarrow.evaluate((el) => document.activeElement === el && el.matches(':focus-visible') && parseFloat(getComputedStyle(el).outlineWidth) > 0), true);
+              await narrow.screenshot({ path: 'evidence/narrow-layout.png' });
+              await Promise.all([narrow.waitForURL('**/design'), narrow.keyboard.press('Enter')]);
+              await narrow.getByRole('application', { name: '车身贴画编辑器' }).waitFor();
+              console.log('GREEN: keyboard navigation and visible focus at 390 px, return to editor, switch vehicle side and add sticker.');
               console.log('GREEN: studio entry, sample disclaimer, return to editor, collision, opening clearance, bounds, outside-board preview, valid drop, Escape, keyboard blur and keyboard placement; original furniture position preserved.');
             } finally { await browser.close(); }
           }
