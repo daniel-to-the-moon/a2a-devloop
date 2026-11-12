@@ -41,7 +41,7 @@ jobs:
             exit 1
           fi
           cat ../red.txt
-          rg -q 'entry has silhouette pixels in the frame margin' ../red.txt
+          grep -q 'entry has silhouette pixels in the frame margin' ../red.txt
           git restore tests/wrap-guides.test.ts
       - name: Ask Fable 5 for the projection and shader fix
         env:
