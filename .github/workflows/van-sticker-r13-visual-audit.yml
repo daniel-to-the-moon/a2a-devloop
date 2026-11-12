@@ -1,0 +1,111 @@
+name: Compare MXGARAGE body on main and PR 96
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-r13-visual-audit.yml]
+permissions: {}
+jobs:
+  visual-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Capture matching entry views and production drawing
+        run: |
+          set -euo pipefail
+          base=244009e344e0c326495471a175959fada037cef3
+          head=f52eae83d2052e975ce15852cbe7a57b03e17edd
+          repo=https://github.com/daniel-to-the-moon/van-sticker-studio.git
+          mkdir -p evidence
+          git init -q app-base
+          git -C app-base fetch -q --depth 1 "$repo" "$base" "$head"
+          git -C app-base checkout -q --detach "$base"
+          git -C app-base worktree add --detach ../app-head "$head"
+          cmp app-base/package-lock.json app-head/package-lock.json
+          cmp app-base/public/model/mxgarage-rv.glb app-head/public/model/mxgarage-rv.glb
+          cmp app-base/lib/wrap-guides.json app-head/lib/wrap-guides.json
+          printf 'main=%s\npr96=%s\n' "$base" "$head" > evidence/revisions.txt
+          sha256sum app-{base,head}/public/model/mxgarage-rv.glb app-{base,head}/lib/wrap-guides.json >> evidence/revisions.txt
+          npm --prefix app-base ci
+          cp -a app-base/node_modules app-head/node_modules
+          npm install --prefix "$RUNNER_TEMP/r13-visual" --no-audit --no-fund playwright@1.56.1
+          "$RUNNER_TEMP/r13-visual/node_modules/.bin/playwright" install --with-deps chromium
+          cat > capture.cjs <<'JS'
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const { chromium } = require(process.env.RUNNER_TEMP + '/r13-visual/node_modules/playwright');
+          (async () => {
+            const label = process.argv[2];
+            const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
+            try {
+              const page = await browser.newPage({ viewport: { width: 1400, height: 1100 }, deviceScaleFactor: 1 });
+              const url = 'http://localhost:4173';
+              await page.goto(url + '/design');
+              await page.getByText('正在恢复草稿', { exact: true }).waitFor({ state: 'hidden', timeout: 15000 });
+              const canvas = page.locator('svg.wrap-canvas');
+              await canvas.waitFor();
+              const guide = await canvas.evaluate((el) => {
+                const body = el.querySelector(':scope > image').getAttribute('href');
+                const transform = el.getScreenCTM();
+                return { image: body, scaleX: transform.a, scaleY: transform.d, viewport: [el.clientWidth, el.clientHeight] };
+              });
+              await canvas.screenshot({ path: 'evidence/' + label + '-editor-entry.png' });
+              fs.writeFileSync('evidence/' + label + '-guide-entry.png', Buffer.from(guide.image.split(',')[1], 'base64'));
+              delete guide.image;
+              fs.writeFileSync('evidence/' + label + '-projection.json', JSON.stringify(guide) + '\n');
+              const asset = page.waitForResponse((r) => new URL(r.url()).pathname === '/model/mxgarage-rv.glb' && r.ok(), { timeout: 25000 });
+              await page.getByRole('button', { name: '3D 预览', exact: true }).click();
+              await asset;
+              await page.getByRole('button', { name: '入口正侧面', exact: true }).click();
+              const render = page.locator('.wrap-preview canvas');
+              await render.waitFor();
+              await page.waitForTimeout(1800);
+              await render.screenshot({ path: 'evidence/' + label + '-render-entry.png' });
+              await page.goto(url + '/?drawing-export=1');
+              await page.waitForFunction(() => {
+                try { return window.__drawingExport?.exportDrawing('entry').dataUrl.startsWith('data:image/png;base64,'); }
+                catch { return false; }
+              }, null, { timeout: 30000, polling: 1200 });
+              for (const view of ['entry', 'front-three-quarter', 'rear-three-quarter']) {
+                const dataUrl = await page.evaluate((id) => window.__drawingExport.exportDrawing(id).dataUrl, view);
+                assert.ok(dataUrl.startsWith('data:image/png;base64,'));
+                fs.writeFileSync('evidence/' + label + '-drawing-' + view + '.png', Buffer.from(dataUrl.split(',')[1], 'base64'));
+              }
+            } finally {
+              await browser.close();
+            }
+          })().catch((error) => { console.error(error); process.exitCode = 1; });
+          JS
+          start() {
+            (cd "$1" && exec ./node_modules/.bin/vinext dev --host localhost --port 4173 --strictPort) > "evidence/$1.log" 2>&1 &
+            pid=$!
+            for attempt in {1..35}; do
+              if curl -fsS --noproxy "*" --max-time 5 http://localhost:4173/design >/dev/null 2>&1; then return; fi
+              sleep 1
+            done
+            cat "evidence/$1.log"
+            return 1
+          }
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          start app-base
+          node capture.cjs main
+          kill "$pid"
+          wait "$pid" || true
+          start app-head
+          node capture.cjs pr96
+          for view in editor-entry guide-entry drawing-entry drawing-front-three-quarter drawing-rear-three-quarter; do
+            if cmp -s "evidence/main-$view.png" "evidence/pr96-$view.png"; then
+              printf '%s identical PNG bytes\n' "$view"
+            else
+              printf '%s PNG bytes differ\n' "$view"
+            fi
+          done | tee evidence/comparison.txt
+          cat evidence/revisions.txt evidence/{main,pr96}-projection.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: r13-matched-visual-evidence
+          path: evidence/
+          if-no-files-found: error
