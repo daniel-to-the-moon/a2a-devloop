@@ -37,6 +37,14 @@ jobs:
           s = s.replace('key={index}', 'key={`${fixture.x}:${fixture.y}`}').replace('placedFixtures.map((fixture, index)', 'placedFixtures.map((fixture)')
           file.write_text('\n'.join(line.rstrip() for line in s.splitlines()) + '\n')
           PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: l03-normalized-candidate
+          path: candidate/
+          if-no-files-found: error
+      - name: Install dependencies and browser
+        run: |
+          set -euo pipefail
           npm --prefix project ci
           npm install --prefix "$RUNNER_TEMP/l03-browser" --no-audit --no-fund playwright@1.56.1
           "$RUNNER_TEMP/l03-browser/node_modules/.bin/playwright" install --with-deps chromium
@@ -53,7 +61,7 @@ jobs:
             try {
               const page = await browser.newPage({ viewport: { width: 1400, height: 980 } });
               const port = process.argv[2] === 'baseline' ? 4173 : 4174;
-              await page.goto(`http://127.0.0.1:${port}/interior-layout`);
+              await page.goto(`http://localhost:${port}/interior-layout`);
               const palette = page.getByTestId('fixture-palette');
               if (process.argv[2] === 'baseline') {
                 await palette.waitFor({ timeout: 1800 }).then(
@@ -69,7 +77,7 @@ jobs:
               const preview = page.getByTestId('placement-preview');
               const status = page.getByTestId('placement-status');
               const placed = page.getByTestId('placed-fixture');
-              await palette.waitFor();
+              await palette.waitFor({ timeout: 12000 });
               const original = await placed.first().boundingBox();
               assert.equal(await placed.count(), 1);
               async function drag(x, y) {
@@ -78,7 +86,7 @@ jobs:
                 await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
                 await page.mouse.down();
                 await page.mouse.move(target.x + target.width * x / 5000, target.y + target.height * y / 2000, { steps: 8 });
-                await preview.waitFor();
+                await preview.waitFor({ timeout: 8000 });
               }
               async function invalid(x, y, reason, screenshot) {
                 await drag(x, y);
@@ -122,10 +130,10 @@ jobs:
           main().catch((error) => { console.error(error); process.exitCode = 1; });
           TEST
           start() {
-            (cd project && npm run dev -- --host 127.0.0.1 --port "$1") > "evidence/server-$1.log" 2>&1 &
+            (cd project && npm run dev -- --host localhost --port "$1") > "evidence/server-$1.log" 2>&1 &
             server=$!
             for attempt in {1..40}; do
-              if curl -s --max-time 2 "http://127.0.0.1:$1/" >/dev/null; then return; fi
+              if curl -s --noproxy "*" --max-time 5 "http://localhost:$1/interior-layout" >/dev/null; then return; fi
               sleep 1
             done
             cat "evidence/server-$1.log"
