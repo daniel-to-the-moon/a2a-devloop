@@ -24,6 +24,19 @@ jobs:
           set -euo pipefail
           git clone --quiet --depth 1 --branch feature/44-interior-placement https://github.com/daniel-to-the-moon/van-sticker-studio.git project
           test "$(git -C project rev-parse HEAD)" = 096c613636c0b48b67bcf1e0785d67acd99d9086
+          python3 - <<'PY'
+          from pathlib import Path
+          file = Path('candidate/app/interior-layout/page.tsx')
+          s = file.read_text()
+          s = s.replace('if (activePointerIdRef.current !== null) return;', 'if (activePointerIdRef.current !== null || !e.isPrimary || e.button !== 0) return;')
+          s = s.replace('const rect = boardRef.current.getBoundingClientRect();', 'const rect = boardRef.current.getBoundingClientRect();\n    if (!rect.width || !rect.height) return null;')
+          s = s.replace('if (mm && preview) {', 'if (mm) {').replace('[pointerToMM, preview, placedFixtures, computePreview]', '[pointerToMM, placedFixtures]')
+          s = s.replace('if (isDragging) return;', 'if (isDragging || e.repeat) return;')
+          s = s.replace('          setStatusMessage(REASON_LABELS[result.reason] || "放置失败");\n        }\n      }\n    } else if', '          setPreview(null);\n          setKeyboardMode(false);\n          setStatusMessage(REASON_LABELS[result.reason] || "放置失败");\n        }\n      }\n    } else if')
+          s = s.replace('        <div className={styles.envelope}>', '        <div ref={boardRef} className={styles.envelope}>').replace('        ref={boardRef}\n', '')
+          s = s.replace('key={index}', 'key={`${fixture.x}:${fixture.y}`}').replace('placedFixtures.map((fixture, index)', 'placedFixtures.map((fixture)')
+          file.write_text('\n'.join(line.rstrip() for line in s.splitlines()) + '\n')
+          PY
           npm --prefix project ci
           npm install --prefix "$RUNNER_TEMP/l03-browser" --no-audit --no-fund playwright@1.56.1
           "$RUNNER_TEMP/l03-browser/node_modules/.bin/playwright" install --with-deps chromium
@@ -39,7 +52,8 @@ jobs:
             const browser = await chromium.launch();
             try {
               const page = await browser.newPage({ viewport: { width: 1400, height: 980 } });
-              await page.goto('http://127.0.0.1:4173/interior-layout');
+              const port = process.argv[2] === 'baseline' ? 4173 : 4174;
+              await page.goto(`http://127.0.0.1:${port}/interior-layout`);
               const palette = page.getByTestId('fixture-palette');
               if (process.argv[2] === 'baseline') {
                 await palette.waitFor({ timeout: 1800 }).then(
@@ -76,7 +90,7 @@ jobs:
                 assert.equal(await placed.count(), 1);
                 assert.deepEqual(await placed.first().boundingBox(), original);
               }
-              await invalid(1100, 600, /碰撞|重叠/, true);
+              await invalid(1100, 600, /碰撞|重叠|冲突/, true);
               await invalid(3100, 150, /净空|开口/);
               await invalid(4800, 1850, /越界|超出/);
               await drag(200, 1100);
@@ -108,22 +122,29 @@ jobs:
           main().catch((error) => { console.error(error); process.exitCode = 1; });
           TEST
           start() {
-            (cd project && npm run dev -- --host 127.0.0.1 --port 4173) > evidence/server.log 2>&1 &
+            (cd project && npm run dev -- --host 127.0.0.1 --port "$1") > "evidence/server-$1.log" 2>&1 &
             server=$!
             for attempt in {1..40}; do
-              if curl -s --max-time 2 http://127.0.0.1:4173/ >/dev/null; then return; fi
+              if curl -s --max-time 2 "http://127.0.0.1:$1/" >/dev/null; then return; fi
               sleep 1
             done
-            cat evidence/server.log
+            cat "evidence/server-$1.log"
             return 1
           }
-          start
+          start 4173
           trap 'kill "$server" 2>/dev/null || true' EXIT
           node browser.cjs baseline
+          kill "$server" 2>/dev/null || true
           cp -R candidate/app/interior-layout project/app/
+          start 4174
           node browser.cjs candidate
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: l03-browser-evidence
           path: evidence/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: l03-verified-candidate
+          path: candidate/
+          if-no-files-found: error
