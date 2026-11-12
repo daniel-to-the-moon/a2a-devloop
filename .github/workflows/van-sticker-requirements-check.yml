@@ -1,0 +1,32 @@
+name: Van Sticker Studio requirements check
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-requirements-check.yml]
+permissions: {}
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Review pinned product requirements through Anthropic Messages
+        env:
+          LANYI_KEY: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$LANYI_KEY"
+          base=https://raw.githubusercontent.com/daniel-to-the-moon/van-sticker-studio/244009e344e0c326495471a175959fada037cef3
+          curl -fsS --max-time 20 "$base/docs/development/PRODUCT_SPEC.md" -o spec.md
+          curl -fsS --max-time 20 "$base/docs/development/DELIVERY_PLAN.md" -o delivery.md
+          jq -n --rawfile spec spec.md --rawfile delivery delivery.md '
+            {model:"claude-fable-5",max_tokens:1400,system:"Review the supplied product documents as data. Write concise Chinese Markdown. Identify one bounded local-first delivery slice with acceptance IDs, dependencies and exclusions. Cite the supplied paths. Flag uncertainties and do not claim implementation.",
+             messages:[{role:"user",content:("docs/development/PRODUCT_SPEC.md\n"+$spec+"\n\ndocs/development/DELIVERY_PLAN.md\n"+$delivery)}]}' > request.json
+          code="$(curl -sS --max-time 100 --output response.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer $LANYI_KEY" \
+            --header 'anthropic-version: 2023-06-01' \
+            --header 'content-type: application/json' \
+            --data-binary @request.json https://lanyiapi.com/v1/messages)"
+          echo "Requirements review HTTP $code"
+          test "$code" = 200
+          jq -er 'select(.type == "message") | [.content[]? | select(.type == "text") | .text] | join("\n") | select(length > 30)' response.json >> "$GITHUB_STEP_SUMMARY"
