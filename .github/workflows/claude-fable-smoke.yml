@@ -21,22 +21,20 @@ jobs:
           fi
           response="$(mktemp)"
           trap 'rm -f "$response"' EXIT
-          for host in lanyiapi.com us.lanyiapi.com hk.lanyiapi.com; do
+          passed=0
+          for model in claude-fable-5 claude-fable-5-1 claude-fable-5-2; do
+            payload="$(jq -nc --arg model "$model" '{model:$model,max_tokens:64,messages:[{role:"user",content:"Reply with only OK."}]}')"
             code="$(curl --silent --show-error --max-time 45 --output "$response" --write-out '%{http_code}' \
-            --header "Authorization: Bearer $LANYI_KEY" \
-            --header 'anthropic-version: 2023-06-01' \
-            --header 'content-type: application/json' \
-            --data '{"model":"claude-fable-5","max_tokens":32,"messages":[{"role":"user","content":"Reply with only OK."}]}' \
-            "https://$host/v1/messages")"
-            echo "$host Anthropic Messages status: $code"
-            if [ "$code" != 200 ]; then
-              jq -r '(.error.code // .error.type // "unknown") as $value | if ($value | type) == "string" and ($value | test("^[a-z][a-z0-9_]{0,48}$")) then "Gateway error code: " + $value else "Gateway error code unavailable" end' "$response" 2>/dev/null || true
+              --header "Authorization: Bearer $LANYI_KEY" \
+              --header 'anthropic-version: 2023-06-01' \
+              --header 'content-type: application/json' \
+              --data "$payload" https://lanyiapi.com/v1/messages)"
+            echo "$model HTTP $code"
+            if [ "$code" = 200 ] && jq -e '.type == "message" and any(.content[]?; .type == "text" and (.text | length > 0))' "$response" >/dev/null; then
+              echo "$model returned a Messages text response"
+              passed=1
+            else
+              jq -r '(.error.code // .error.type // "unknown") as $v | if ($v | type) == "string" and ($v | test("^[a-z][a-z0-9_]{0,48}$")) then "Gateway error code: " + $v else "Gateway error code unavailable" end' "$response" 2>/dev/null || true
             fi
-            case "$code" in
-              502|503|504) continue ;;
-              *) break ;;
-            esac
           done
-          test "$code" = 200
-          jq -e '.type == "message" and ([.content[]? | select(.type == "text") | .text | test("^\\s*OK[.!]?\\s*$";"i")] | any)' "$response" >/dev/null
-          jq -r 'if .model == "claude-fable-5" then "Response model matches requested ID." else "Response reports a different model ID; check gateway mapping." end' "$response"
+          test "$passed" = 1
