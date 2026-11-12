@@ -29,7 +29,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           file = Path('candidate/app/interior-layout/page.tsx')
-          s = file.read_text()
+          s = '\n'.join(line.rstrip() for line in file.read_text().splitlines()) + '\n'
           s = s.replace('if (activePointerIdRef.current !== null) return;', 'if (activePointerIdRef.current !== null || !e.isPrimary || e.button !== 0) return;')
           s = s.replace('const rect = boardRef.current.getBoundingClientRect();', 'const rect = boardRef.current.getBoundingClientRect();\n    if (!rect.width || !rect.height) return null;')
           s = s.replace('if (mm && preview) {', 'if (mm) {').replace('[pointerToMM, preview, placedFixtures, computePreview]', '[pointerToMM, placedFixtures]')
@@ -43,6 +43,7 @@ jobs:
           s = s.replace('  const clearPreview = useCallback(() => {\n    activePointerIdRef.current = null;', '  const clearPreview = useCallback(() => {\n    const pointerId = activePointerIdRef.current;\n    const palette = paletteRef.current;\n    activePointerIdRef.current = null;\n    if (pointerId !== null && palette?.hasPointerCapture(pointerId)) {\n      palette.releasePointerCapture(pointerId);\n    }')
           s = s.replace('    return () => window.removeEventListener("keydown", handleEscape);', '    const handleHidden = () => {\n      if (document.hidden) clearPreview();\n    };\n    window.addEventListener("blur", clearPreview);\n    document.addEventListener("visibilitychange", handleHidden);\n    return () => {\n      window.removeEventListener("keydown", handleEscape);\n      window.removeEventListener("blur", clearPreview);\n      document.removeEventListener("visibilitychange", handleHidden);\n    };')
           s = s.replace('          data-testid="fixture-palette"', '          ref={paletteRef}\n          onBlur={() => { if (keyboardMode) clearPreview(); }}\n          data-testid="fixture-palette"')
+          assert '<output\n        data-testid="placement-status"' in s and '{statusMessage}\n      </output>' in s
           file.write_text('\n'.join(line.rstrip() for line in s.splitlines()) + '\n')
           css = file.with_name('layout.module.css')
           c = css.read_text().replace('  overflow: hidden;\n','').replace('.envelope {\n  position:', '.envelope {\n  border-radius: inherit;\n  position:').replace('.status {\n', '.status {\n  display: block;\n').replace('.preview {\n', '.preview {\n  z-index: 1;\n')
