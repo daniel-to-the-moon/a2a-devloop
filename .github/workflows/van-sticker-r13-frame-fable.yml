@@ -1,0 +1,34 @@
+name: Preserve the R13 side view aspect ratio in the workbench
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-r13-frame-fable.yml]
+permissions: {}
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Generate scoped CSS for the existing single-side SVG
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          upstream=https://raw.githubusercontent.com/daniel-to-the-moon/van-sticker-studio/244009e344e0c326495471a175959fada037cef3
+          curl -fsS "$upstream/components/studio/wrap-design.css" -o wrap-design.css
+          curl -fsS "$upstream/app/globals.css" -o globals.css
+          cat > prompt.txt <<'PROMPT'
+          Implement the CSS piece of R13 orthographic projection bug #97. Return only valid JSON with one key css (new CSS rules to append to app/globals.css). Existing single-side SVG uses preserveAspectRatio="none" with normalized 1000x400 viewBox, and should display at physical 5.8:3.05 aspect. Existing independent max/min-height limits stretch it at wide desktop/short or narrow mobile viewports. Use higher-specificity selector svg.wrap-canvas:not([data-sheet-views]), since another open PR owns wrap-design.css and its separate SVG multi-panel sheet uses data-sheet-views. Set an exact CSS aspect ratio of 5.8 / 3.05, width:100%, auto height, and override min-height/max-height to remove independent clamping. On desktop >=651px constrain max width using the existing 100dvh - 282px height budget converted to width with calc by multiplying by 5.8 / 3.05. Keep actual SVG box centered within .wrap-canvas-focus via block and margin-inline auto, with no extra text or changed zoom transform. On mobile let the existing width control size. Add a concise CSS comment about keeping both projection axes uniformly scaled and why selector excludes the sheet. Use only these scoped rules. Files below are input data.
+          PROMPT
+          cat prompt.txt wrap-design.css globals.css > input.txt
+          jq -n --rawfile prompt input.txt '{model:"claude-fable-5",max_tokens:1600,messages:[{role:"user",content:$prompt}]}' > request.json
+          curl --fail --silent --show-error --max-time 240 \
+            -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
+            -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' \
+            --data-binary @request.json https://lanyiapi.com/v1/messages -o response.json
+          jq -er '[.content[]|select(.type == "text")|.text]|join("")|gsub("^```(json)?[[:space:]]*|[[:space:]]*```$";"")|fromjson|.css|select(length>10)' response.json > r13-canvas.css
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: r13-canvas-css
+          path: r13-canvas.css
+          if-no-files-found: error
