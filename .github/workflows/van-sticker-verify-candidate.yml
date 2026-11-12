@@ -28,6 +28,45 @@ jobs:
           for path in Path('candidate').rglob('*.ts'):
               path.write_text(path.read_text().rstrip() + '\n')
           PY
+          cat >> candidate/tests/interior-placement.test.ts <<'TEST'
+
+          void test('rotation changes containment and collisions', () => {
+            const nearRight: Fixture = { x: 4300, y: 100, width: 1500, height: 600, rotation: 0 };
+            assert.deepEqual(validateFixturePlacement(nearRight, envelope, [], []), {
+              valid: false, reason: 'outside_envelope',
+            });
+            assert.deepEqual(validateFixturePlacement({ ...nearRight, rotation: 90 }, envelope, [], []), {
+              valid: true,
+            });
+
+            const nearBottom = { ...nearRight, x: 100, y: 1000 };
+            assert.deepEqual(validateFixturePlacement(nearBottom, envelope, [], []), { valid: true });
+            assert.deepEqual(validateFixturePlacement({ ...nearBottom, rotation: 90 }, envelope, [], []), {
+              valid: false, reason: 'outside_envelope',
+            });
+
+            const narrow: Fixture = { x: 500, y: 500, width: 200, height: 800, rotation: 0 };
+            const adjacent: Fixture = { x: 1000, y: 500, width: 200, height: 200, rotation: 0 };
+            assert.deepEqual(validateFixturePlacement(narrow, envelope, [adjacent], []), { valid: true });
+            assert.deepEqual(validateFixturePlacement({ ...narrow, rotation: 90 }, envelope, [adjacent], []), {
+              valid: false, reason: 'collision_with_fixture',
+            });
+            assert.deepEqual(validateFixturePlacement(adjacent, envelope, [{ ...narrow, rotation: 90 }], []), {
+              valid: false, reason: 'collision_with_fixture',
+            });
+            assert.deepEqual(validateFixturePlacement({ ...narrow, rotation: 90 }, envelope, [], [adjacent]), {
+              valid: false, reason: 'collision_with_clearance',
+            });
+          });
+          TEST
+          sed -i '/export interface Fixture extends Rectangle {/a\  /** x and y locate the top-left corner of the rotated footprint. */' candidate/lib/interior-placement.ts
+          cp -r candidate rotation-mutant
+          sed -i '/if (fixture.rotation === 90) {/,/^  }$/d' rotation-mutant/lib/interior-placement.ts
+          if node --experimental-strip-types --test --test-name-pattern='rotation changes containment' rotation-mutant/tests/interior-placement.test.ts > rotation-red.log 2>&1; then
+            cat rotation-red.log
+            exit 1
+          fi
+          grep -E 'not ok.*rotation changes containment' rotation-red.log
           cp -r candidate mutant
           sed -i '/if (!isFiniteRect(clearance)) {/,/^    }$/d' mutant/lib/interior-placement.ts
           if node --experimental-strip-types --test --test-name-pattern='reject clearance with overflow' mutant/tests/interior-placement.test.ts > red.log 2>&1; then
