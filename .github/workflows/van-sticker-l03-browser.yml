@@ -95,7 +95,13 @@ jobs:
               try {
                 await page.waitForFunction(() => {
                   const button = document.querySelector('[data-testid="fixture-palette"]');
-                  return button && Object.keys(button).some((key) => key.startsWith('__reactProps
+                  return button && Object.keys(button).some((key) => key.startsWith('__reactProps'));
+                }, null, { timeout: 12000 });
+              } catch (error) {
+                await page.screenshot({ path: 'evidence/hydration-failure.png' });
+                throw error;
+              }
+              const original = await placed.first().boundingBox();
               assert.equal(await placed.count(), 1);
               async function drag(x, y) {
                 await palette.hover({ timeout: 5000 });
@@ -109,112 +115,6 @@ jobs:
                   await page.screenshot({ path: 'evidence/drag-failure.png' });
                   throw error;
                 }
-              }
-              async function invalid(x, y, reason, screenshot) {
-                await drag(x, y);
-                assert.equal(await preview.getAttribute('data-valid'), 'false');
-                assert.match(await status.innerText(), reason);
-                if (screenshot) await page.screenshot({ path: 'evidence/invalid-preview.png' });
-                await page.mouse.up();
-                await preview.waitFor({ state: 'detached' });
-                assert.equal(await placed.count(), 1);
-                assert.deepEqual(await placed.first().boundingBox(), original);
-              }
-              await invalid(1100, 600, /碰撞|重叠|冲突/, true);
-              await invalid(3100, 150, /净空|开口/);
-              await invalid(4800, 1850, /越界|超出/);
-              await drag(5100, 1500);
-              assert.equal(await preview.getAttribute('data-valid'), 'false');
-              assert.match(await status.innerText(), /越界|超出/);
-              const outside = await preview.boundingBox();
-              const layout = await board.boundingBox();
-              assert.ok(outside.x > layout.x + layout.width);
-              assert.equal(await preview.evaluate((el) => {
-                for (let parent = el.parentElement; parent; parent = parent.parentElement) {
-                  if (getComputedStyle(parent).overflowX === 'hidden') return false;
-                }
-                return true;
-              }), true);
-              await page.mouse.up();
-              await preview.waitFor({ state: 'detached' });
-              assert.equal(await placed.count(), 1);
-              await drag(200, 1100);
-              assert.equal(await preview.getAttribute('data-valid'), 'true');
-              const opacity = await preview.evaluate((el) => Number(getComputedStyle(el).opacity));
-              assert.ok(opacity > 0 && opacity < 0.7, 'preview must be translucent');
-              await page.screenshot({ path: 'evidence/valid-preview.png' });
-              await page.mouse.up();
-              await preview.waitFor({ state: 'detached' });
-              assert.equal(await placed.count(), 2);
-              assert.deepEqual(await placed.first().boundingBox(), original);
-              await drag(4000, 1000);
-              await page.keyboard.press('Escape');
-              await preview.waitFor({ state: 'detached' });
-              await page.mouse.up();
-              assert.equal(await placed.count(), 2);
-              await palette.focus();
-              await page.keyboard.press('Space');
-              await preview.waitFor();
-              await page.keyboard.press('Tab');
-              await preview.waitFor({ state: 'detached' });
-              assert.equal(await placed.count(), 2);
-              await palette.focus();
-              await page.keyboard.press('Space');
-              await preview.waitFor();
-              await page.keyboard.press('ArrowRight');
-              await page.keyboard.press('Space');
-              await preview.waitFor({ state: 'detached' });
-              assert.equal(await placed.count(), 3);
-              assert.deepEqual(await placed.first().boundingBox(), original);
-              await page.screenshot({ path: 'evidence/after-drop.png' });
-              console.log('GREEN: collision, opening clearance, bounds, outside-board preview, valid drop, Escape, keyboard blur and keyboard placement; original furniture position preserved.');
-            } finally { await browser.close(); }
-          }
-          main().catch((error) => { console.error(error); process.exitCode = 1; });
-          TEST
-          cp -a project project-candidate
-          cp -R candidate/app/interior-layout project-candidate/app/
-          start() {
-            (cd "$2" && exec ./node_modules/.bin/vinext dev --host localhost --port "$1") > "evidence/server-$1.log" 2>&1 &
-            server=$!
-            for attempt in {1..40}; do
-              if curl -s --noproxy "*" --max-time 5 "http://localhost:$1/interior-layout" >/dev/null; then return; fi
-              sleep 1
-            done
-            cat "evidence/server-$1.log"
-            return 1
-          }
-          start 4173 project
-          trap 'kill "$server" 2>/dev/null || true' EXIT
-          node browser.cjs baseline
-          kill "$server" 2>/dev/null || true
-          start 4174 project-candidate
-          node browser.cjs candidate
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: l03-browser-evidence
-          path: evidence/
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: l03-verified-candidate
-          path: candidate/
-          if-no-files-found: error
-));
-                }, null, { timeout: 12000 });
-              } catch (error) {
-                await page.screenshot({ path: 'evidence/hydration-failure.png' });
-                throw error;
-              }
-              const original = await placed.first().boundingBox();
-              assert.equal(await placed.count(), 1);
-              async function drag(x, y) {
-                const from = await palette.boundingBox();
-                const target = await board.boundingBox();
-                await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-                await page.mouse.down();
-                await page.mouse.move(target.x + target.width * x / 5000, target.y + target.height * y / 2000, { steps: 8 });
-                await preview.waitFor({ timeout: 8000 });
               }
               async function invalid(x, y, reason, screenshot) {
                 await drag(x, y);
