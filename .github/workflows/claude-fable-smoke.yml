@@ -7,7 +7,7 @@ permissions: {}
 jobs:
   messages:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 4
     steps:
       - name: Verify one Anthropic Messages response
         env:
@@ -21,13 +21,19 @@ jobs:
           fi
           response="$(mktemp)"
           trap 'rm -f "$response"' EXIT
-          code="$(curl --silent --show-error --max-time 45 --output "$response" --write-out '%{http_code}' \
+          for host in lanyiapi.com us.lanyiapi.com hk.lanyiapi.com; do
+            code="$(curl --silent --show-error --max-time 45 --output "$response" --write-out '%{http_code}' \
             --header "Authorization: Bearer $LANYI_KEY" \
             --header 'anthropic-version: 2023-06-01' \
             --header 'content-type: application/json' \
             --data '{"model":"claude-fable-5","max_tokens":32,"messages":[{"role":"user","content":"Reply with only OK."}]}' \
-            https://lanyiapi.com/v1/messages)"
-          echo "Anthropic Messages status: $code"
+            "https://$host/v1/messages")"
+            echo "$host Anthropic Messages status: $code"
+            case "$code" in
+              502|503|504) continue ;;
+              *) break ;;
+            esac
+          done
           test "$code" = 200
           jq -e '.type == "message" and ([.content[]? | select(.type == "text") | .text | test("^\\s*OK[.!]?\\s*$";"i")] | any)' "$response" >/dev/null
           jq -r 'if .model == "claude-fable-5" then "Response model matches requested ID." else "Response reports a different model ID; check gateway mapping." end' "$response"
