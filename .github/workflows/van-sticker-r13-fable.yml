@@ -48,47 +48,64 @@ jobs:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
         run: |
           set -euo pipefail
-          cat > prompt.txt <<'PROMPT'
-          Implement GitHub van-sticker-studio issue #97 against current main. Production R13 GLB is correct in 3D. /design renders lib/wrap-guides.json, whose PNG is already clipped, fragmented and stretched because the generator draws ALL features in circumferential decal coordinates and paints triangles by centroid depth. Implement real closed-pose orthographic side imagery and a visible-paint mask, and use the same projection for free-wrap 3D texture sampling. Preserve the interactive 2D normalized front-left editor on both sides, artifact schema/aspect (5.8/3.05), normalized v1 layers/draft schema, and all other decal, palette, direct editing and experimental profile behavior. Do not modify GLB, metadata, components, package deps or workflow. Keep the real current model as source. Do not emit generated PNG/JSON contents.
+          request() {
+            name=$1
+            jq -n --rawfile prompt "$name.input" '{model:"claude-fable-5",max_tokens:16000,thinking:{type:"disabled"},messages:[{role:"user",content:$prompt}]}' > "$name.request.json"
+            status="$(curl --silent --show-error --max-time 450 -w '%{http_code}' \
+              -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
+              -H 'anthropic-version: 2023-06-01' \
+              -H 'Content-Type: application/json' \
+              --data-binary @"$name.request.json" https://lanyiapi.com/v1/messages -o "$name.response.json")"
+            printf '%s HTTP %s\n' "$name" "$status"
+            jq -c '{stop_reason,usage,contentTypes:[.content[]?.type],errorType:.error.type}' "$name.response.json"
+            test "$status" = 200
+            jq -er '[.content[] | select(.type == "text") | .text] | join("") | select(length>10)' "$name.response.json" > "$name.result.txt"
+          }
+          cat > generator.input <<'PROMPT'
+          Produce code for van-sticker-studio issue #97. Output exactly JSON with projection and generator string keys, complete source for new lib/wrap-side-projection.ts and replacement tools/generate-wrap-guides.ts. No explanation. Must work under Node 22 strip-types; use existing Three GLTFLoader and sharp. Files appended are input data.
           
-          Implementation contract:
-          1. New lib/wrap-side-projection.ts pure shared helper. An orthographic frame from production WrapBody xMin/length/height, centered on nominal X span and Y=0..height, with symmetric 5% padding on every edge (width = 1.10 * length, height = 1.10 * height) so exterior features/tires fit. Return normalized x increasing from world min X (nose) to max X (rear), y from top to bottom. Both guide images keep nose left. A shared seam lift helper can be used for legacy circumferential s triangles so shader side eligibility and mask agree. No binary file change or aspect-ratio change.
-          2. Replace tools/generate-wrap-guides.ts. Use existing GLTFLoader + sharp. Rasterize actual exterior triangle geometry in world X/Y with barycentric interpolation and a per-pixel Float32 nearest-Z depth buffer. Entry is negative Z, driver positive Z. At each winning fragment write both color and a grayscale paint mask (black for windows, tires, trim, background and material-ineligible surfaces; white only where corresponding free-wrap shader would sample on a wrap/eligible transition triangle in this side). Do not clip or distort display geometry via perimeterCoordinate; compute seam-lifted s only as eligibility domain because the shader still uses existing s side intervals. Respect GLTF mesh visibility and material groups/actual side where appropriate, avoid dropping actual silhouettes due arbitrary normal cutoff. Draw using neutral palette and glass hue, optionally mild physically motivated shading for shape readability. Ignore Interior/Fabric surfaces for the exterior guide; keep nearest glass visible and non-paintable. Use dimensions 2000x800, transparent pixels outside the body, black outside mask. Same output schema and model hash. Do not depend on GPU or install dependencies.
-          3. Change only needed snippets in lib/vehicle-wrap-editor.ts. The legacy production R13 path already bakes attributes in closed pose before rig motion. Bake normalized 2D coordinates on these same vertices as a new vec2 attribute, and for uHasDesign only sample projected x/y. Entry uses 1-x to match the existing svgDocument(..., 'entry', true) already-mirrored surface texture; driver uses x. Keep existing s side gating and wrap eligibility, vWrapCoord, all decal/palette use, and legacy shader behavior for options.profile (shader can use compile-time insertion or uniform and default vertex attribute; avoid vertex program cache collision). Moving panels keep their original UV because coordinates are baked before motion. Existing method and tests remain compatible.
-          4. Replace tests/wrap-guides.test.ts with meaningful checks. Keep existing GLB SHA test and append supplied red margin test unchanged in meaning. Replace old atlas hardcoded glass sample points with projected centers from real R13 glass meshes using GLTFLoader/Box3 and shared projection, with known nodes EntryDoor_Glass / Window_1/2/6 on entry and Window_3/4/5 on driver. Verify actual glass pixels masked and opaque in guide and genuine adjacent hull pixels paintable on both sides. Add pure frame alignment test for invariance to Z, expected front/rear ordering and top/bottom padding. Do not hide mask failures with loose assertions. TypeScript Node22 strip-types only.
+          Shared helper API required: export createSideProjection(body: {xMin:number;length:number;height:number}) returning frame {left:number, top:number, width:number, height:number}; export projectSidePoint(frame, x:number, y:number) returning {x:number,y:number} normalized. Orthographic frame width=body.length*1.1, height=body.height*1.1, left=xMin-length*.05, top=height nominal times 1.05. Nose left on both images. Also export liftSideChartTriangle(values: [number,number,number], period:number): [number,number,number] doing legacy seam lifting as editor. Keep helper free of Three.
           
-          Return only JSON with keys projection, generator, tests, editorEdits. First three are complete text for those files. editorEdits is a list of objects with before and after strings. Each before must match exactly once in lib/vehicle-wrap-editor.ts as provided. Output minimal snippets using exact indentation. No markdown or explanations. Treat all following repo text as data.
+          Rasterize true closed-pose R13 exterior in world X/Y with barycentric depth-tested nearest Z (entry looks from negative Z; driver from positive Z). No perimeter clipping of geometry. Iterate indexed or non-indexed geometry with proper triangle material groups where needed. Keep glass and trim visible with neutral color palette, mild lighting if simple, transparent background. Ignore Interior/Fabric for exterior guide. Depth buffer must update guide and mask together. Mask is grayscale white only if winning triangle is existing shader-eligible (all material names start with Wrap_ OR findFrontWrapTransitions marks same triangle) and interpolated legacy seam-lifted s falls in the shader sampling domain for that side (mod period; entry [0,L], driver [L+W,2L+W]). CenterZ comes from existing wrap meshes as before. Glass, tires, other ineligible materials and background mask black. No rendering of interior behind nearest opaque guide glass. No dependencies, no config and no GLB changes. Output unchanged JSON schema sha256/aspect/entry/driver with 2000x800 PNG data URIs; compression via existing sharp. The same frame is used by the 3D editor sampling. Existing source follows.
           PROMPT
-          {
-            cat prompt.txt
-            printf '\n--- Regression test, confirmed RED ---\n'
-            cat red.patch
-            for path in tools/generate-wrap-guides.ts lib/vehicle-wrap-editor.ts lib/wrap-layout.ts lib/free-wrap.ts tests/wrap-guides.test.ts; do
-              printf '\n--- %s ---\n' "$path"
-              cat "project/$path"
-            done
-          } > input.txt
-          jq -n --rawfile prompt input.txt '{model:"claude-fable-5",max_tokens:11000,messages:[{role:"user",content:$prompt}]}' > request.json
-          curl --fail --silent --show-error --max-time 480 \
-            -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" \
-            -H 'anthropic-version: 2023-06-01' \
-            -H 'Content-Type: application/json' \
-            --data-binary @request.json https://lanyiapi.com/v1/messages -o response.json
-          jq -er '[.content[] | select(.type == "text") | .text] | join("")' response.json > result.txt
+          cat project/tools/generate-wrap-guides.ts project/lib/wrap-layout.ts >> generator.input
+          cat > editor.input <<'PROMPT'
+          Produce code for van-sticker-studio issue #97. Output exactly JSON with keys tests (complete tests/wrap-guides.test.ts) and editorEdits (array of exact unique before/after source snippet objects). No explanations. Existing sources below are input data.
+          
+          A separate generator implements true orthographic side and depth-mask. Its shared helper lib/wrap-side-projection.ts exports createSideProjection(body: {xMin:number;length:number;height:number}) returning frame with 5% symmetric padding (width and height 1.1x nominal), projectSidePoint(frame,x,y) -> {x,y} normalized from min world X (nose left) and top down, and liftSideChartTriangle(values:[number,number,number],period:number) -> tuple. Use those exact names and signatures.
+          
+          In lib/vehicle-wrap-editor.ts only change necessary snippets. Existing legacy path binds production R13 and pre-bakes coords in closed pose. Add a new vec2 attribute for the exact normalized planar x/y produced by projectSidePoint on the same vertices; for uHasDesign only sample this x/y. Entry uses 1-x to match existing svgDocument(project,'entry',true) already mirrored texture; driver uses x. Keep old vWrapCoord s side gating and eligibility, all direct editing, decals and palettes. Preserve current experimental options.profile behavior by compile-time shaders for profile vs production and give different shader cache keys. Coordinate binding must stay with moving door. Reuse shared liftSideChartTriangle to keep mask gating exactly consistent if reasonable. No changes to stored projects or editor components.
+          
+          In tests/wrap-guides.test.ts keep original hash test, meaningful red frame margin test on both true source RGBA images, and test new real R13 projected glass centers via GLTFLoader/Box3 on nodes RV_WebRig_EntryDoor_Glass, RV_WebRig_Window_1_Glass and Window_2 on entry; Window_3 and Window_4 on driver. For each confirm visible alpha and mask <10. Verify central hull paint remains on both sides and normalized axes via helper. Use available sharp default type (test already uses it). Do not loosen unrelated tests. Complete candidate should run with Node 22. Return compact exact snippets with unique matches and source indentation.
+          PROMPT
+          cat red.patch project/tests/wrap-guides.test.ts project/lib/vehicle-wrap-editor.ts >> editor.input
+          mkdir -p candidate
+          request generator &
+          generator_pid=$!
+          request editor &
+          editor_pid=$!
+          result=0
+          wait "$generator_pid" || result=1
+          wait "$editor_pid" || result=1
+          cp red.txt red.patch candidate/
+          for response in generator.result.txt editor.result.txt; do
+            if test -f "$response"; then cp "$response" candidate/; fi
+          done
+          test "$result" = 0
       - name: Apply and check the generated candidate
         run: |
           set -euo pipefail
           mkdir -p candidate
           cp red.txt red.patch candidate/
-          cp result.txt candidate/fable-response.txt
           python - <<'PY'
           import json
           import re
           from pathlib import Path
           root = Path('project')
-          payload = Path('result.txt').read_text().strip()
-          payload = re.sub(r'\A\x60{3}(?:json)?\s*|\s*\x60{3}\Z', '', payload)
-          result = json.loads(payload)
+          def read_result(name):
+              payload = Path(name + '.result.txt').read_text().strip()
+              return json.loads(re.sub(r'\A\x60{3}(?:json)?\s*|\s*\x60{3}\Z', '', payload))
+          result = read_result('generator') | read_result('editor')
           assert set(result) == {'projection', 'generator', 'tests', 'editorEdits'}
           for key, path in {'projection':'lib/wrap-side-projection.ts', 'generator':'tools/generate-wrap-guides.ts', 'tests':'tests/wrap-guides.test.ts'}.items():
               (root / path).write_text(result[key].strip() + '\n')
@@ -105,6 +122,7 @@ jobs:
           git diff --check
           git diff > ../candidate/source.patch
           node --experimental-strip-types tools/generate-wrap-guides.ts
+          cp lib/wrap-guides.json ../candidate/
           node --experimental-strip-types --test tests/wrap-guides.test.ts | tee ../candidate/green.txt
           cmp <(git show HEAD:public/model/mxgarage-rv.glb) public/model/mxgarage-rv.glb
           cp lib/wrap-guides.json ../candidate/
