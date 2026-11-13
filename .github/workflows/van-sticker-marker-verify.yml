@@ -16,7 +16,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          head=d9a12b7dd9b3781a8a058b0451806a6c637133ae
+          head=ca35c17b6383c6a51fc853523552a69bd1bf4b59
           printf '%s\n' "$head" > evidence/revision.txt
           git init -q app
           git -C app fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git "$head"
@@ -92,17 +92,18 @@ jobs:
               const draft={version:2, background:'#f3eedf', layers:faces.map(([face])=>({
                 id:face+'-art',name:face,linked:false,entry:null,driver:null,[face]:mkArt('#e31868')
               }))};
+              await select('entry','入口侧');
               await page.getByLabel('导入草稿').setInputFiles({
                 name:'four-faces.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(draft))
               });
-              await board.locator('[data-layer=entry-art]').waitFor();
+              await board.locator('[data-layer=entry-art]').waitFor({state:'attached'});
               await page.waitForFunction(()=>JSON.parse(localStorage.getItem('mxgarage-free-wrap-v1'))?.project?.layers?.length===4);
               await page.reload();
-              await board.locator('[data-layer=entry-art]').waitFor();
+              await board.locator('[data-layer=entry-art]').waitFor({state:'attached'});
               for (const [face,name] of faces) {
                 await select(face,name);
                 assert.equal(await board.locator('[data-layer]').count(), 1);
-                await board.locator('[data-layer='+face+'-art]').waitFor();
+                await board.locator('[data-layer='+face+'-art]').waitFor({state:'attached'});
               }
               await select('entry','入口侧');
               await page.getByRole('button',{name:'3D 预览'}).click();
