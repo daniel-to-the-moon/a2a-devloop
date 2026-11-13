@@ -16,7 +16,7 @@ jobs:
         run: |
           set -euo pipefail
           base=244009e344e0c326495471a175959fada037cef3
-          head=7a5c716fbb5dd94fd3518cba0ea50456b9daacee
+          head=c3e7f94b35e6fa56b7a9329666894a9eeb08562e
           repo=https://github.com/daniel-to-the-moon/van-sticker-studio.git
           mkdir -p evidence
           git init -q app-base
@@ -52,7 +52,7 @@ jobs:
               if (data[i] > 100 && data[i] > data[i + 1] * 1.6 && data[i] > data[i + 2] * 1.1) count++;
             return count;
           }
-          function assertBitmapDirection({ data, info }, description) {
+          function assertBitmapDirection({ data, info }, description, minimumPixels = 25, separation = 5) {
             const blue = { count: 0, x: 0 };
             const green = { count: 0, x: 0 };
             for (let i = 0; i < data.length; i += 4) {
@@ -67,11 +67,11 @@ jobs:
                 green.x += x;
               }
             }
-            assert.ok(blue.count > 25 && green.count > 25, description + ' bitmap colors missing');
+            assert.ok(blue.count > minimumPixels && green.count > minimumPixels, description + ' bitmap colors missing');
             const left = blue.x / blue.count;
             const right = green.x / green.count;
-            assert.ok(left + 5 < right, description + ' bitmap reads backwards');
-            console.log(description, JSON.stringify({ blueX: left, greenX: right }));
+            assert.ok(left + separation < right, description + ' bitmap reads backwards');
+            console.log(description, JSON.stringify({ blueX: left, greenX: right, blueCount: blue.count, greenCount: green.count }));
           }
           function pixel({ data, info }, x, y) {
             const i = (Math.floor(y * info.height) * info.width + Math.floor(x * info.width)) * 4;
@@ -95,6 +95,14 @@ jobs:
               page.on('console', (message) => {
                 if (/Shader Error|VALIDATE_STATUS|shader compile/i.test(message.text())) shaderErrors.push(message.text());
               });
+              if (label === 'after') {
+                await page.addInitScript(() => {
+                  const key = 'mxgarage-free-wrap-v1';
+                  if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify({
+                    storageVersion: 1, assets: [], project: { version: 1, background: '#f3eedf', layers: [] },
+                  }));
+                });
+              }
               await page.goto(url + '/design');
               await page.getByText('正在恢复草稿', { exact: true }).waitFor({ state: 'hidden', timeout: 15000 });
               const canvas = page.locator('svg.wrap-canvas');
@@ -128,6 +136,9 @@ jobs:
               assertRatio(narrow);
               await canvas.screenshot({ path: 'evidence/after-mobile-entry.png' });
               await page.setViewportSize({ width: 1400, height: 1100 });
+              const storageKey = 'mxgarage-free-wrap-v1';
+              await page.waitForFunction((key) => JSON.parse(localStorage.getItem(key))?.project.version === 2, storageKey);
+              console.log('PASS: pristine legacy autosave opens and persists on projection v2.');
               const landmarks = JSON.parse(fs.readFileSync('landmarks.json', 'utf8'));
               const art = {
                 kind: 'region', x: .22, y: .24, w: .73, h: .42, rotation: 0,
@@ -146,7 +157,7 @@ jobs:
                 raw: { width: 80, height: 32, channels: 3 },
               }).png().toBuffer()).toString('base64');
               const imageArt = { ...art, kind: 'image', points: [], src: bitmap, x: .62, y: .52, w: .17, h: .09 };
-              const draft = { version: 1, background: '#f3eedf', layers: [
+              const draft = { version: 2, background: '#f3eedf', layers: [
                 { id: 'projection-check', name: '侧视贴膜验收', linked: false, entry: art, driver: { ...art, color: '#f44510' } },
                 { id: 'asymmetric-bitmap', name: '图片方向验收', linked: true, entry: imageArt, driver: imageArt },
               ] };
@@ -212,6 +223,38 @@ jobs:
                 assert.ok(redCount(painted) > 450, side.key + ' film was not rendered by the actual 3D shader');
                 assertBitmapDirection(painted, '3D ' + side.key);
               }
+              await page.getByRole('button', { name: '返回编辑', exact: true }).click();
+              const rearArt = { ...imageArt, x: .929, y: .565, w: .042, h: .07 };
+              const legacy = { ...draft, version: 1, layers: [
+                { id: 'legacy-rear', name: '旧版车尾图片', linked: true, entry: rearArt, driver: rearArt },
+              ] };
+              await page.getByLabel('导入草稿').setInputFiles({
+                name: 'r13-legacy-rear.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(legacy)),
+              });
+              await canvas.locator('[data-layer="legacy-rear"]').waitFor({ state: 'attached', timeout: 15000 });
+              await page.getByText('旧版草稿 · 保留原贴画位置', { exact: true }).waitFor();
+              await page.waitForFunction((key) => JSON.parse(localStorage.getItem(key))?.project.version === 1, storageKey);
+              await page.reload();
+              await page.getByText('旧版草稿 · 保留原贴画位置', { exact: true }).waitFor();
+              await canvas.locator('[data-layer="legacy-rear"]').waitFor({ state: 'attached', timeout: 15000 });
+              for (const side of sides) {
+                await page.locator('.wrap-segment').getByRole('button', { name: side.edit, exact: true }).click();
+                const file = 'evidence/legacy-' + side.key + '-2d.png';
+                await canvas.screenshot({ path: file });
+                assertBitmapDirection(await image(file), 'legacy 2D ' + side.key, 3, 0);
+              }
+              await page.getByRole('button', { name: '3D 预览', exact: true }).click();
+              await rendered.waitFor();
+              for (const side of sides) {
+                await page.locator('.wrap-preview-views').getByRole('button', { name: side.view, exact: true }).click();
+                await page.waitForTimeout(2400);
+                const file = 'evidence/legacy-' + side.key + '-3d.png';
+                const clip = await rendered.boundingBox();
+                assert.ok(clip && clip.width > 0 && clip.height > 0, side.key + ' legacy canvas has no capture area');
+                await page.screenshot({ path: file, clip, timeout: 60000 });
+                assertBitmapDirection(await image(file), 'legacy 3D ' + side.key, 3, 0);
+              }
+              console.log('PASS: imported legacy rear artwork is retained after reload in both views and on both sides.');
               assert.deepEqual(shaderErrors, []);
               console.log('PASS: both sides at 100%, wide and mobile proportions, real glass probes, film drag/zoom and both 3D textures.');
             } finally {
