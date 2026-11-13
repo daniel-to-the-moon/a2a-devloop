@@ -1,0 +1,142 @@
+name: Verify the R13 four-face marker workbench
+on:
+  push:
+    branches: [codex/claude-fable-smoke]
+    paths: [.github/workflows/van-sticker-marker-verify.yml]
+permissions: {}
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Exercise four editable faces in Chromium
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          head=335372a6caa1057631085e16199bdf223935dc53
+          printf '%s\n' "$head" > evidence/revision.txt
+          git init -q app
+          git -C app fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git "$head"
+          git -C app checkout -q --detach "$head"
+          npm --prefix app ci --ignore-scripts
+          npm ci --prefix /tmp/r13-playwright --no-audit --no-fund 2>/dev/null || npm install --prefix /tmp/r13-playwright --no-audit --no-fund playwright@1.56.1
+          /tmp/r13-playwright/node_modules/.bin/playwright install --with-deps chromium
+          (cd app && exec ./node_modules/.bin/vinext dev --host 127.0.0.1 --port 4186 --strictPort) > evidence/app.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for attempt in {1..35}; do
+            if curl -fsS --max-time 5 http://127.0.0.1:4186/design >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          export MARKER_SHARP="$PWD/app/node_modules/sharp"
+          export MARKER_OUTPUT="$PWD/evidence"
+          cat > /tmp/r13-playwright/marker.cjs <<'JS'
+          const assert = require('node:assert/strict');
+          const { chromium } = require('playwright');
+          const sharp = require(process.env.MARKER_SHARP || '../van-sticker-r13-97/node_modules/sharp');
+          
+          (async () => {
+            const browser = await chromium.launch({
+              args: ['--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'],
+            });
+            try {
+              const page = await browser.newPage({viewport:{width:1440,height:1000}});
+              const errors = [];
+              page.on('pageerror', (error) => errors.push(String(error)));
+              page.on('console', (message) => {
+                if (/Shader Error|VALIDATE_STATUS|shader compile/i.test(message.text())) errors.push(message.text());
+              });
+              const output = process.env.MARKER_OUTPUT || 'outputs';
+              const faces = [['entry','入口侧'], ['driver','另一侧'], ['front','车头'], ['rear','车尾']];
+              await page.goto('http://127.0.0.1:4186/design');
+              await page.getByText('正在恢复草稿', {exact:true}).waitFor({state:'hidden'});
+              const tabs = page.getByRole('navigation', {name:'车身四面'});
+              const board = page.locator('svg.wrap-canvas');
+              const stage = page.locator('.wrap-stage');
+              const select = async (face, name) => {
+                await tabs.getByRole('button',{name,exact:true}).click();
+                assert.equal(await board.getAttribute('data-face'), face);
+              };
+              await page.screenshot({path:output+'/R13-sketch-工作台.png'});
+              const tools = page.getByRole('navigation',{name:'创作工具'});
+              assert.equal(await tools.getByText('文字',{exact:true}).isVisible(), false);
+              await tools.getByRole('button',{name:'更多工具'}).click();
+              await tools.getByRole('button',{name:'文字'}).waitFor();
+              assert.ok(await tools.getByLabel('添加图片').isVisible());
+              await tools.getByRole('button',{name:'更多工具'}).click();
+              for (const [face,name] of faces) {
+                await select(face,name);
+                await stage.screenshot({path:output+'/R13-sketch-'+face+'.png'});
+              }
+              await select('entry','入口侧');
+              await tools.getByRole('button',{name:'马克笔'}).click();
+              await page.getByRole('button',{name:'颜色 #ba6352'}).click();
+              const box = await board.boundingBox();
+              await page.mouse.move(box.x + box.width*.47,box.y + box.height*.63);
+              await page.mouse.down();
+              await page.mouse.move(box.x + box.width*.68,box.y + box.height*.72,{steps:14});
+              await page.mouse.up();
+              await board.locator('[data-layer]').waitFor();
+              await stage.screenshot({path:output+'/R13-sketch-马克笔.png'});
+              const mkArt = (color) => ({
+                kind:'region', x:0,y:0,w:1,h:1,rotation:0,color,text:'',font:'sans',icon:'cup',src:'',
+                points:[{x:.12,y:.15},{x:.88,y:.15},{x:.88,y:.91},{x:.12,y:.91}],
+                thickness:.01,dashed:false,visible:true,locked:false
+              });
+              const draft={version:2, background:'#f3eedf', layers:faces.map(([face])=>({
+                id:face+'-art',name:face,linked:false,entry:null,driver:null,[face]:mkArt('#e31868')
+              }))};
+              await page.getByLabel('导入草稿').setInputFiles({
+                name:'four-faces.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(draft))
+              });
+              await board.locator('[data-layer=entry-art]').waitFor();
+              await page.waitForFunction(()=>JSON.parse(localStorage.getItem('mxgarage-free-wrap-v1'))?.project?.layers?.length===4);
+              await page.reload();
+              await board.locator('[data-layer=entry-art]').waitFor();
+              for (const [face,name] of faces) {
+                await select(face,name);
+                assert.equal(await board.locator('[data-layer]').count(), 1);
+                await board.locator('[data-layer='+face+'-art]').waitFor();
+              }
+              await select('entry','入口侧');
+              await page.getByRole('button',{name:'3D 预览'}).click();
+              const preview = page.locator('.wrap-preview');
+              await preview.locator('.wrap-paper-transition').waitFor({state:'attached'});
+              await page.waitForFunction(() => document.querySelector('.wrap-preview')?.dataset.ready === 'true',null,{timeout:60000});
+              const previewButtons=preview.locator('.wrap-preview-views');
+              const viewNames={entry:'入口正侧面',driver:'另一侧',front:'正面',rear:'背面'};
+              for (const [face] of faces) {
+                await previewButtons.getByRole('button',{name:viewNames[face],exact:true}).click();
+                await page.waitForTimeout(1000);
+                const file=output+'/R13-sketch-3D-'+face+'.png';
+                const clip=await preview.locator('canvas').boundingBox();
+                await page.screenshot({path:file,clip,timeout:45000});
+                const {data}=await sharp(file).removeAlpha().raw().toBuffer({resolveWithObject:true});
+                let count=0;
+                for(let i=0;i<data.length;i+=3) if(data[i]>100 && data[i]>data[i+1]*2 && data[i+2]>data[i+1]*1.3) count++;
+                console.log(face+' 3D film pixels',count);
+                assert.ok(count>120,face+' design not present in 3D');
+              }
+              await page.getByRole('button',{name:'返回编辑'}).click();
+              await page.setViewportSize({width:390,height:844});
+              await page.emulateMedia({reducedMotion:'reduce'});
+              await select('entry','入口侧');
+              assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),390);
+              await page.screenshot({path:output+'/R13-sketch-手机.png'});
+              assert.deepEqual(errors,[]);
+              console.log('PASS: four orthographic faces, collapsible tools, real pen stroke, persisted independent art, paper/3D handoff, four painted 3D views, mobile.');
+            } finally {
+              await browser.close();
+            }
+          })().catch(error=>{console.error(error);process.exitCode=1;});
+          JS
+          node /tmp/r13-playwright/marker.cjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: r13-marker-workbench
+          path: evidence/
+          if-no-files-found: error
