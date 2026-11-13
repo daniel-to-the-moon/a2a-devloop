@@ -84,13 +84,28 @@ jobs:
                 await board.locator('[data-layer] path[d^="M"]').waitFor({state:'attached'});
                 if (face === 'entry') await stage.screenshot({path:output+'/R13-sketch-马克笔.png'});
               }
+              await select('entry','入口侧');
+              await page.getByRole('button',{name:'3D 预览'}).click();
+              const firstPreview = page.locator('.wrap-preview');
+              await page.waitForFunction(() => document.querySelector('.wrap-preview')?.dataset.ready === 'true',null,{timeout:60000});
+              await page.waitForTimeout(1100);
+              const strokeShot = output+'/R13-sketch-马克笔转3D.png';
+              await page.screenshot({path:strokeShot,clip:await firstPreview.locator('canvas').boundingBox(),timeout:45000});
+              const stroke = await sharp(strokeShot).removeAlpha().raw().toBuffer();
+              let strokePixels = 0;
+              for (let i=0;i<stroke.length;i+=3)
+                if (stroke[i]>110 && stroke[i]>stroke[i+1]*1.34 && stroke[i+1]>stroke[i+2]*1.03 && stroke[i+2]>45) strokePixels++;
+              console.log('actual marker stroke pixels',strokePixels);
+              assert.ok(strokePixels > 70, 'pointer-drawn marker absent in 3D');
+              await page.getByRole('button',{name:'返回编辑'}).click();
               const mkArt = (color) => ({
                 kind:'region', x:0,y:0,w:1,h:1,rotation:0,color,text:'',font:'sans',icon:'cup',src:'',
                 points:[{x:.12,y:.15},{x:.88,y:.15},{x:.88,y:.91},{x:.12,y:.91}],
                 thickness:.01,dashed:false,visible:true,locked:false
               });
+              const colors={entry:'#e31868',driver:'#144fe3',front:'#14932d',rear:'#e57109'};
               const draft={version:2, background:'#f3eedf', layers:faces.map(([face])=>({
-                id:face+'-art',name:face,linked:false,entry:null,driver:null,[face]:mkArt('#e31868')
+                id:face+'-art',name:face,linked:false,entry:null,driver:null,[face]:mkArt(colors[face])
               }))};
               await select('entry','入口侧');
               await page.getByLabel('导入草稿').setInputFiles({
@@ -119,8 +134,14 @@ jobs:
                 const clip=await preview.locator('canvas').boundingBox();
                 await page.screenshot({path:file,clip,timeout:45000});
                 const {data}=await sharp(file).removeAlpha().raw().toBuffer({resolveWithObject:true});
+                const matches = {
+                  entry:(r,g,b)=>r>100 && r>g*1.7 && b>g*1.35,
+                  driver:(r,g,b)=>b>90 && b>g*1.55 && g>r*1.3,
+                  front:(r,g,b)=>g>75 && g>r*1.6 && g>b*1.55,
+                  rear:(r,g,b)=>r>100 && r>g*1.35 && g>b*1.5
+                };
                 let count=0;
-                for(let i=0;i<data.length;i+=3) if(data[i]>100 && data[i]>data[i+1]*2 && data[i+2]>data[i+1]*1.3) count++;
+                for(let i=0;i<data.length;i+=3) if(matches[face](data[i],data[i+1],data[i+2])) count++;
                 console.log(face+' 3D film pixels',count);
                 assert.ok(count>120,face+' design not present in 3D');
               }
