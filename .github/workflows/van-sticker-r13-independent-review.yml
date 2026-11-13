@@ -11,18 +11,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scope: [lifecycle, projection, generator]
+        scope: [final-delta]
     steps:
       - name: Review the exact patch with a separate model
         run: |
           set -euo pipefail
           scope='${{ matrix.scope }}'
           base=244009e344e0c326495471a175959fada037cef3
-          head=c3e7f94b35e6fa56b7a9329666894a9eeb08562e
+          head=59990a64d0a843cea11ebd506275efd6190cf516
           mkdir -p review runtime
           printf 'base=%s\nhead=%s\n' "$base" "$head" > review/revision.txt
           git init -q repo
-          git -C repo fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git "$base" "$head"
+          git -C repo fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git "$base" "$head" c3e7f94b35e6fa56b7a9329666894a9eeb08562e
           git -C repo diff --check "$base" "$head"
           git -C repo rev-parse "$base:lib/wrap-guides.json" "$head:lib/wrap-legacy-guides.json" >> review/revision.txt
           curl -fsSL --retry 3 --max-time 180 -o runtime.tar.gz https://github.com/ggml-org/llama.cpp/releases/download/b7300/llama-b7300-bin-ubuntu-x64.tar.gz
@@ -57,6 +57,13 @@ jobs:
             git -C repo diff -w --no-color "$base" "$head" -- tools/generate-wrap-guides.ts tests/wrap-guides.test.ts
             printf '\n<|im_end|>\n<|im_start|>assistant\n'
           } > generator.prompt
+          {
+            printf '<|im_start|>system\n'
+            cat instructions.txt
+            printf '<|im_end|>\n<|im_start|>user\nReview the last incremental patch after an independent exact-base review. A previous reviewer confirmed physical aspect mismatch on v2 downloads and guide images. Internal shader textures and legacy exports retain their original dimensions intentionally. Review the actual correction, normalized placement and CSS/SVG scaling. State any concrete unresolved P1/P2 or READY.\n'
+            git -C repo diff -w --no-color c3e7f94b35e6fa56b7a9329666894a9eeb08562e "$head" -- . ':!lib/wrap-guides.json'
+            printf '\n<|im_end|>\n<|im_start|>assistant\n'
+          } > final-delta.prompt
           wait "$fetch_model"
           cli=$(find runtime -type f -name llama-cli -print -quit)
           export LD_LIBRARY_PATH="$PWD/$(dirname "$cli")"
