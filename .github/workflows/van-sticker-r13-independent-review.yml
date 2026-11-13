@@ -28,35 +28,21 @@ jobs:
           cat candidate.diff >> review.in
           printf '\nSVG AND DRAFT CONTEXT\n' >> review.in
           cat free-wrap.ts >> review.in
-          http="$(curl -sS --max-time 25 -o models.json -w '%{http_code}' \
-            -H "Authorization: Bearer $REVIEW_TOKEN" https://lanyiapi.com/v1/models)"
-          printf 'Model list HTTP %s\n' "$http"
-          if [ "$http" = 200 ]; then
-            jq -r '.data[]?.id | select(type == "string") | select(test("^(gemini|grok)[-_.a-zA-Z0-9]+$"))' models.json > models.txt
-          else
-            : > models.txt
-          fi
-          {
-            grep -E '^gemini-.*pro' models.txt || true
-            grep -E '^grok-[0-9]' models.txt || true
-            grep -E '^gemini-.*flash' models.txt || true
-            printf '%s\n' gemini-3-pro-preview grok-4-1-fast-reasoning gemini-2.5-pro
-          } | awk '!seen[$0]++' | head -12 > review-models.txt
           mkdir -p review
-          while IFS= read -r model; do
+          for model in claude-opus-5-5 claude-opus-4-6 claude-sonnet-4-6; do
             jq -n --arg model "$model" --rawfile content review.in \
-              '{model:$model,max_tokens:4500,messages:[{role:"user",content:$content}]}' > request.json
-            code="$(curl -sS --max-time 100 -o response.json -w '%{http_code}' \
-              -H "Authorization: Bearer $REVIEW_TOKEN" -H 'content-type: application/json' \
-              --data-binary @request.json https://lanyiapi.com/v1/chat/completions)" || code=000
+              '{model:$model,max_tokens:5000,messages:[{role:"user",content:$content}]}' > request.json
+            code="$(curl -sS --max-time 150 -o response.json -w '%{http_code}' \
+              -H "Authorization: Bearer $REVIEW_TOKEN" -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' \
+              --data-binary @request.json https://lanyiapi.com/v1/messages)" || code=000
             printf '%s HTTP %s\n' "$model" "$code"
-            if [ "$code" = 200 ] && jq -er '.choices[0].message.content | select(type=="string" and length>100)' response.json > review/review.md; then
+            if [ "$code" = 200 ] && jq -er '[.content[]? | select(.type == "text") | .text] | join("\n") | select(length>100)' response.json > review/review.md; then
               jq -n --arg requested "$model" --arg resolved "$(jq -r '.model // ""' response.json)" --arg base "$base" --arg head "$head" \
                 '{requested:$requested,resolved:$resolved,base:$base,head:$head}' > review/reviewer.json
               cat review/review.md >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
-          done < review-models.txt
+          done
           exit 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
