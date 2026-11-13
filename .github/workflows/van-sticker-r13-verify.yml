@@ -1,4 +1,4 @@
-name: Verify both R13 side projections and decals in Chromium
+name: Verify merged R13 side projections and decals on main
 on:
   push:
     branches: [codex/claude-fable-smoke]
@@ -16,11 +16,13 @@ jobs:
         run: |
           set -euo pipefail
           base=244009e344e0c326495471a175959fada037cef3
-          head=59990a64d0a843cea11ebd506275efd6190cf516
+          head=4b893b9862b526a93ee74dec0163bd75dd36957a
           repo=https://github.com/daniel-to-the-moon/van-sticker-studio.git
+          test "$(git ls-remote "$repo" refs/heads/main | cut -f1)" = "$head"
           mkdir -p evidence
           git init -q app-base
           git -C app-base fetch -q --depth 1 "$repo" "$base" "$head"
+          test "$(git -C app-base rev-parse "$head^{tree}")" = 2aa6418885db696473f2242fd24dfeb8f7630ce1
           git -C app-base checkout -q --detach "$base"
           git -C app-base worktree add --detach ../app-head "$head"
           cmp app-base/package-lock.json app-head/package-lock.json
