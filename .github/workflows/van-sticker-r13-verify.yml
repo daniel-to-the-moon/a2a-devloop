@@ -16,7 +16,7 @@ jobs:
         run: |
           set -euo pipefail
           base=244009e344e0c326495471a175959fada037cef3
-          head=c3e7f94b35e6fa56b7a9329666894a9eeb08562e
+          head=59990a64d0a843cea11ebd506275efd6190cf516
           repo=https://github.com/daniel-to-the-moon/van-sticker-studio.git
           mkdir -p evidence
           git init -q app-base
@@ -35,6 +35,7 @@ jobs:
           const assert = require('node:assert/strict');
           const fs = require('node:fs');
           const path = require('node:path');
+          const { readFile } = require('node:fs/promises');
           const { chromium } = require(process.env.RUNNER_TEMP + '/r13-visual/node_modules/playwright');
           const sharp = require(path.resolve('app-base/node_modules/sharp'));
           const label = process.argv[2];
@@ -86,6 +87,20 @@ jobs:
           function assertRatio(measured) {
             assert.ok(measured.width > 0 && measured.height > 0);
             assert.ok(Math.abs(measured.width / measured.height - 5.8 / 3.05) < 0.015, JSON.stringify(measured));
+          }
+          async function verifySvgDownload(page, side, version) {
+            const pending = page.waitForEvent('download');
+            await page.getByRole('button', { name: '导出图案 SVG', exact: true }).click();
+            const download = await pending;
+            assert.ok(download.suggestedFilename().endsWith('.svg'));
+            const contents = await readFile(await download.path(), 'utf8');
+            const dimensions = contents.match(/<svg[^>]+ width="(\d+)" height="(\d+)"/);
+            assert.ok(dimensions, 'download has no SVG viewport');
+            assert.equal(Number(dimensions[1]), 2000);
+            assert.equal(Number(dimensions[2]), version === 2 ? 1052 : 800);
+            assert.equal(contents.includes('preserveAspectRatio="none"'), version === 2);
+            fs.writeFileSync('evidence/v' + version + '-' + side + '-download.svg', contents);
+            console.log('SVG download', version, side, dimensions[1], dimensions[2]);
           }
           async function main() {
             const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
@@ -179,6 +194,7 @@ jobs:
                 const after = await image(file);
                 assert.ok(redCount(after) > 2000, side.key + ' contains no rendered 2D film');
                 assertBitmapDirection(after, '2D ' + side.key);
+                await verifySvgDownload(page, side.key, 2);
                 for (const mark of landmarks[side.key]) {
                   assert.ok(mark.x >= art.x && mark.x <= art.x + art.w && mark.y >= art.y && mark.y <= art.y + art.h, mark.name + ' not covered by the film test');
                   assert.deepEqual(pixel(after, mark.x, mark.y), pixel(before, mark.x, mark.y), mark.name + ' was painted over in 2D');
@@ -242,6 +258,7 @@ jobs:
                 const file = 'evidence/legacy-' + side.key + '-2d.png';
                 await canvas.screenshot({ path: file });
                 assertBitmapDirection(await image(file), 'legacy 2D ' + side.key, 3, 0);
+                await verifySvgDownload(page, side.key, 1);
               }
               await page.getByRole('button', { name: '3D 预览', exact: true }).click();
               await rendered.waitFor();
