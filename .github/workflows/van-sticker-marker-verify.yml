@@ -16,21 +16,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          head=335372a6caa1057631085e16199bdf223935dc53
+          head=d9a12b7dd9b3781a8a058b0451806a6c637133ae
           printf '%s\n' "$head" > evidence/revision.txt
           git init -q app
           git -C app fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git "$head"
           git -C app checkout -q --detach "$head"
           npm --prefix app ci --ignore-scripts
-          npm ci --prefix /tmp/r13-playwright --no-audit --no-fund 2>/dev/null || npm install --prefix /tmp/r13-playwright --no-audit --no-fund playwright@1.56.1
+          npm install --prefix /tmp/r13-playwright --no-audit --no-fund playwright@1.56.1
           /tmp/r13-playwright/node_modules/.bin/playwright install --with-deps chromium
-          (cd app && exec ./node_modules/.bin/vinext dev --host 127.0.0.1 --port 4186 --strictPort) > evidence/app.log 2>&1 &
+          (cd app && exec ./node_modules/.bin/vinext dev --host localhost --port 4186 --strictPort) > evidence/app.log 2>&1 &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true' EXIT
           for attempt in {1..35}; do
-            if curl -fsS --max-time 5 http://127.0.0.1:4186/design >/dev/null 2>&1; then break; fi
+            if curl -fsS --max-time 5 http://localhost:4186/design >/dev/null 2>&1; then break; fi
             sleep 1
           done
+          curl -fsS --max-time 15 http://localhost:4186/design >/dev/null || { cat evidence/app.log; exit 1; }
           export MARKER_SHARP="$PWD/app/node_modules/sharp"
           export MARKER_OUTPUT="$PWD/evidence"
           cat > /tmp/r13-playwright/marker.cjs <<'JS'
@@ -51,7 +52,7 @@ jobs:
               });
               const output = process.env.MARKER_OUTPUT || 'outputs';
               const faces = [['entry','入口侧'], ['driver','另一侧'], ['front','车头'], ['rear','车尾']];
-              await page.goto('http://127.0.0.1:4186/design');
+              await page.goto('http://localhost:4186/design');
               await page.getByText('正在恢复草稿', {exact:true}).waitFor({state:'hidden'});
               const tabs = page.getByRole('navigation', {name:'车身四面'});
               const board = page.locator('svg.wrap-canvas');
@@ -71,16 +72,18 @@ jobs:
                 await select(face,name);
                 await stage.screenshot({path:output+'/R13-sketch-'+face+'.png'});
               }
-              await select('entry','入口侧');
-              await tools.getByRole('button',{name:'马克笔'}).click();
-              await page.getByRole('button',{name:'颜色 #ba6352'}).click();
-              const box = await board.boundingBox();
-              await page.mouse.move(box.x + box.width*.47,box.y + box.height*.63);
-              await page.mouse.down();
-              await page.mouse.move(box.x + box.width*.68,box.y + box.height*.72,{steps:14});
-              await page.mouse.up();
-              await board.locator('[data-layer]').waitFor();
-              await stage.screenshot({path:output+'/R13-sketch-马克笔.png'});
+              for (const [face, name] of faces) {
+                await select(face, name);
+                await tools.getByRole('button',{name:'马克笔'}).click();
+                await page.getByRole('button',{name:'颜色 #ba6352'}).click();
+                const box = await board.boundingBox();
+                await page.mouse.move(box.x + box.width*.44,box.y + box.height*.61);
+                await page.mouse.down();
+                await page.mouse.move(box.x + box.width*.67,box.y + box.height*.68,{steps:14});
+                await page.mouse.up();
+                await board.locator('[data-layer] path[d^="M"]').waitFor({state:'attached'});
+                if (face === 'entry') await stage.screenshot({path:output+'/R13-sketch-马克笔.png'});
+              }
               const mkArt = (color) => ({
                 kind:'region', x:0,y:0,w:1,h:1,rotation:0,color,text:'',font:'sans',icon:'cup',src:'',
                 points:[{x:.12,y:.15},{x:.88,y:.15},{x:.88,y:.91},{x:.12,y:.91}],
