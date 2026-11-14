@@ -16,12 +16,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          head=0f85fbc332ac8ef9d0a232d29fa77a0fbd305d39
+          head=471d0cd3f9197bf8565ff6bfcbc12806a004dd17
           printf '%s\n' "$head" > evidence/revision.txt
           git init -q app
           git -C app fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git "$head"
-          git -C app fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git 3ac25536d1c5f78b97a4406957ee43c129f2baee
-          git -C app show 3ac25536d1c5f78b97a4406957ee43c129f2baee:lib/wrap-guides.json > previous-guides.json
+          git -C app fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git 0f85fbc332ac8ef9d0a232d29fa77a0fbd305d39
+          git -C app show 0f85fbc332ac8ef9d0a232d29fa77a0fbd305d39:lib/wrap-guides.json > previous-guides.json
           git -C app checkout -q --detach "$head"
           node - <<'VERIFY'
           const assert = require('node:assert/strict');
@@ -31,7 +31,9 @@ jobs:
           for (const face of ['entry','driver','front','rear']) {
             assert.equal(previous[face].image, current[face].image);
             assert.equal(previous[face].mask, current[face].mask);
-            assert.ok(current[face].wash.startsWith('data:image/png;base64,'));
+            for (const layer of ['drawing', 'shading', 'ink']) {
+              assert.ok(current[face][layer].startsWith('data:image/png;base64,'), face + ' ' + layer);
+            }
           }
           console.log('PASS: source geometry, base guide and paint mask match on all four faces.');
           VERIFY
@@ -47,6 +49,29 @@ jobs:
           done
           curl -fsS --max-time 15 http://localhost:4186/design >/dev/null || { cat evidence/app.log; exit 1; }
           export MARKER_SHARP="$PWD/app/node_modules/sharp"
+          MARKER_SHARP="$MARKER_SHARP" node - <<'VERIFY_GRAPHITE'
+          const assert = require('node:assert/strict');
+          const sharp = require(process.env.MARKER_SHARP);
+          const current = require('./app/lib/wrap-guides.json');
+          (async () => {
+            for (const face of ['entry', 'driver', 'front', 'rear']) {
+              const decode = (field) => sharp(Buffer.from(current[face][field].split(',')[1], 'base64')).ensureAlpha().raw().toBuffer({resolveWithObject: true});
+              const [drawing, shading] = await Promise.all([decode('drawing'), decode('shading')]);
+              assert.deepEqual(drawing.info, shading.info);
+              let opaque = 0;
+              let graphite = 0;
+              for (let i = 0; i < drawing.data.length; i += 4) {
+                if (drawing.data[i + 3] > 0) {
+                  opaque++;
+                  assert.ok(Math.abs(drawing.data[i] - drawing.data[i + 2]) < 2, face + ' base is not neutral');
+                }
+                if (shading.data[i + 3] > 16) graphite++;
+              }
+              assert.ok(graphite > opaque * 0.025 && graphite < opaque * 0.32, face + ' has no sparse graphite marks');
+              console.log('Graphite coverage', face, graphite, opaque);
+            }
+          })().catch((error) => { console.error(error); process.exitCode = 1; });
+          VERIFY_GRAPHITE
           export MARKER_OUTPUT="$PWD/evidence"
           cat > /tmp/r13-playwright/marker.cjs <<'JS'
           const assert = require('node:assert/strict');
