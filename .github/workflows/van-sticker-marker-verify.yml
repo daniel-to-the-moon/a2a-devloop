@@ -1,4 +1,4 @@
-name: Verify the R13 four-face marker workbench
+name: Verify the R13 grayscale workbench
 on:
   push:
     branches: [codex/claude-fable-smoke]
@@ -16,12 +16,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          head=471d0cd3f9197bf8565ff6bfcbc12806a004dd17
+          head=a98546fdfbf4845a8b2e3492e0939c85c307f04c
           printf '%s\n' "$head" > evidence/revision.txt
           git init -q app
           git -C app fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git "$head"
-          git -C app fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git 0f85fbc332ac8ef9d0a232d29fa77a0fbd305d39
-          git -C app show 0f85fbc332ac8ef9d0a232d29fa77a0fbd305d39:lib/wrap-guides.json > previous-guides.json
+          git -C app fetch -q --depth 1 https://github.com/daniel-to-the-moon/van-sticker-studio.git 471d0cd3f9197bf8565ff6bfcbc12806a004dd17
+          git -C app show 471d0cd3f9197bf8565ff6bfcbc12806a004dd17:lib/wrap-guides.json > previous-guides.json
           git -C app checkout -q --detach "$head"
           node - <<'VERIFY'
           const assert = require('node:assert/strict');
@@ -29,13 +29,10 @@ jobs:
           const current = require('./app/lib/wrap-guides.json');
           assert.equal(previous.sha256, current.sha256);
           for (const face of ['entry','driver','front','rear']) {
-            assert.equal(previous[face].image, current[face].image);
             assert.equal(previous[face].mask, current[face].mask);
-            for (const layer of ['drawing', 'shading', 'ink']) {
-              assert.ok(current[face][layer].startsWith('data:image/png;base64,'), face + ' ' + layer);
-            }
+            assert.deepEqual(Object.keys(current[face]).sort(), ['image', 'mask']);
           }
-          console.log('PASS: source geometry, base guide and paint mask match on all four faces.');
+          console.log('PASS: source geometry and paint mask match on all four faces.');
           VERIFY
           npm --prefix app ci --ignore-scripts
           npm install --prefix /tmp/r13-playwright --no-audit --no-fund playwright@1.56.1
@@ -49,29 +46,28 @@ jobs:
           done
           curl -fsS --max-time 15 http://localhost:4186/design >/dev/null || { cat evidence/app.log; exit 1; }
           export MARKER_SHARP="$PWD/app/node_modules/sharp"
-          MARKER_SHARP="$MARKER_SHARP" node - <<'VERIFY_GRAPHITE'
+          MARKER_SHARP="$MARKER_SHARP" node - <<'VERIFY_GRAYSCALE'
           const assert = require('node:assert/strict');
           const sharp = require(process.env.MARKER_SHARP);
           const current = require('./app/lib/wrap-guides.json');
+          const previous = require('./previous-guides.json');
           (async () => {
             for (const face of ['entry', 'driver', 'front', 'rear']) {
-              const decode = (field) => sharp(Buffer.from(current[face][field].split(',')[1], 'base64')).ensureAlpha().raw().toBuffer({resolveWithObject: true});
-              const [drawing, shading] = await Promise.all([decode('drawing'), decode('shading')]);
-              assert.deepEqual(drawing.info, shading.info);
-              let opaque = 0;
-              let graphite = 0;
-              for (let i = 0; i < drawing.data.length; i += 4) {
-                if (drawing.data[i + 3] > 0) {
-                  opaque++;
-                  assert.ok(Math.abs(drawing.data[i] - drawing.data[i + 2]) < 2, face + ' base is not neutral');
-                }
-                if (shading.data[i + 3] > 16) graphite++;
+              const decode = (asset) => sharp(Buffer.from(asset.split(',')[1], 'base64')).ensureAlpha().raw().toBuffer({resolveWithObject: true});
+              const [oldGuide, grayGuide] = await Promise.all([decode(previous[face].image), decode(current[face].image)]);
+              assert.deepEqual(oldGuide.info, grayGuide.info);
+              let visible = 0;
+              for (let i = 0; i < grayGuide.data.length; i += 4) {
+                assert.equal(grayGuide.data[i + 3], oldGuide.data[i + 3], face + ' silhouette changed');
+                if (grayGuide.data[i + 3] === 0) continue;
+                visible++;
+                assert.equal(grayGuide.data[i], grayGuide.data[i + 1], face + ' contains color');
+                assert.equal(grayGuide.data[i], grayGuide.data[i + 2], face + ' contains color');
               }
-              assert.ok(graphite > opaque * 0.025 && graphite < opaque * 0.32, face + ' has no sparse graphite marks');
-              console.log('Graphite coverage', face, graphite, opaque);
+              console.log('Verified grayscale and silhouette', face, visible);
             }
           })().catch((error) => { console.error(error); process.exitCode = 1; });
-          VERIFY_GRAPHITE
+          VERIFY_GRAYSCALE
           export MARKER_OUTPUT="$PWD/evidence"
           cat > /tmp/r13-playwright/marker.cjs <<'JS'
           const assert = require('node:assert/strict');
@@ -100,7 +96,8 @@ jobs:
                 await tabs.getByRole('button',{name,exact:true}).click();
                 assert.equal(await board.getAttribute('data-face'), face);
               };
-              await page.locator('svg.wrap-canvas > image').nth(2).waitFor({state:'attached'});
+              await page.locator('svg.wrap-canvas > image').waitFor({state:'attached'});
+              assert.equal(await page.locator('svg.wrap-canvas > image').count(), 1);
               await page.screenshot({path:output+'/R13-sketch-工作台.png'});
               const tools = page.getByRole('navigation',{name:'创作工具'});
               assert.equal(await tools.getByText('文字',{exact:true}).isVisible(), false);
