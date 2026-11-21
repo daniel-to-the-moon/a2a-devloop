@@ -96,6 +96,23 @@ test('publish：fix 推送到分支并评论；评论触发不动标签', () => 
   assert.doesNotMatch(t.gh.log(), /remove-label/);
 });
 
+test('publish：fix 期间分支已被别人更新 → 作废本次修复、不推送、不加 needs-user，评论说明', () => {
+  const t = publishSetup();
+  const other = join(root, `br-${n++}`);
+  execFileSync('git', ['clone', '-q', '-b', 'claude/x', t.remote, other]);
+  writeFileSync(join(other, 'c'), '3');
+  execFileSync('git', ['-C', other, 'add', 'c']);
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'manual fix'], { cwd: other });
+  execFileSync('git', ['push', '-q', 'origin', 'claude/x'], { cwd: other });
+  const moved = t.ref('refs/heads/claude/x');
+  const r = t.run({ MODE: 'fix', EVENT: 'workflow_dispatch' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /published=superseded/);
+  assert.equal(t.ref('refs/heads/claude/x'), moved, '不覆盖别人的新提交');
+  assert.match(t.gh.log(), /^pr comment 4/m);
+  assert.doesNotMatch(t.gh.log(), /needs-user/);
+});
+
 test('publish：手动重跑成功后只移除 needs-user（不动 hold）', () => {
   const t = publishSetup();
   const r = t.run({ MODE: 'fix', EVENT: 'workflow_dispatch' });
@@ -195,7 +212,7 @@ test('claude.yml：work 成功或失败才运行 publish；被取消或跳过不
   assert.equal(publishRuns('skipped'), false);
 });
 
-test('publish：拒绝推送到非 claude/* 分支；分支已被别人更新（非快进）时失败、不覆盖', () => {
+test('publish：拒绝推送到非 claude/* 分支；implement 时分支已被别人更新（非快进）失败、不覆盖（fix 的情形见“作废本次修复”）', () => {
   const bad = publishSetup({ branch: 'main' });
   assert.notEqual(bad.run({ MODE: 'fix', EVENT: 'issue_comment' }).status, 0);
   assert.equal(bad.ref('refs/heads/main'), bad.start);
@@ -210,7 +227,7 @@ test('publish：拒绝推送到非 claude/* 分支；分支已被别人更新（
   execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'other'], { cwd: other });
   execFileSync('git', ['push', '-q', 'origin', 'claude/x'], { cwd: other });
   const theirs = t.ref('refs/heads/claude/x');
-  assert.notEqual(t.run({ MODE: 'fix', EVENT: 'issue_comment' }).status, 0);
+  assert.notEqual(t.run({ MODE: 'implement', EVENT: 'issues' }).status, 0);
   assert.equal(t.ref('refs/heads/claude/x'), theirs);
 });
 
