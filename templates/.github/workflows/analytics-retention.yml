@@ -1,0 +1,36 @@
+# 匿名统计（可选）的保留期清理（docs/ANALYTICS.md）：每天删除超过 RETENTION_DAYS（默认 180 天，提案值）的记录。
+# 与发布解耦：站点不再发布、或统计已关闭（ANALYTICS=off），已存的记录照样按期删除；查询失败即失败。
+# 只稀疏检出 main 的 scripts/devloop，不执行应用代码；逻辑在 scripts/devloop/d1-retention.sh（pages.test.mjs 覆盖）。
+name: analytics-retention
+
+on:
+  schedule:
+    - cron: '17 19 * * *' # 每天 UTC 19:17（上海时间 03:17），按需改
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: analytics-retention
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: github.ref == 'refs/heads/main' && vars.PAGES_PROJECT != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: scripts/devloop
+          persist-credentials: false
+      - name: 删除过期的匿名统计记录
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PROJECT: ${{ vars.PAGES_PROJECT }}
+          RETENTION_DAYS: ${{ vars.RETENTION_DAYS || '180' }}
+          ANALYTICS: ${{ vars.ANALYTICS }}
+        run: bash scripts/devloop/d1-retention.sh

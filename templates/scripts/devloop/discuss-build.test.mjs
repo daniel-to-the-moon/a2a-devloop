@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { alreadyReviewed, BOT_LOGIN, buildPrompt, PROMPT_BUDGET, REVIEW_MARKER, THREAD_LIMIT, THREAD_MIN, threadText } from './discuss-build.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
+
+/** 可选模块的文件没装时跳过对应测试（只装核心循环时 CI 不会因 ENOENT 失败） */
+const optionalMissing = (p) => (existsSync(join(HERE, '../..', p)) ? false : `${p} 未安装（可选模块），跳过`);
 const root = mkdtempSync(join(tmpdir(), 'discuss-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -140,7 +143,7 @@ test('严格假 gh 能识别无效参数（防止测试形同虚设）', () => {
   assert.notEqual(r.status, 0);
 });
 
-test('gpt-discuss.yml：取数走 discuss-fetch.sh，发评论时追加去重标记', () => {
+test('gpt-discuss.yml：取数走 discuss-fetch.sh，发评论时追加去重标记', { skip: optionalMissing('.github/workflows/gpt-discuss.yml') }, () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/gpt-discuss.yml'), 'utf8');
   assert.match(yml, /bash scripts\/devloop\/discuss-fetch\.sh "\$REPO" "\$N" "\$d"/);
   assert.doesNotMatch(yml, / -c >/);

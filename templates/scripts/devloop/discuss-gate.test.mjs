@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { gate } from './discuss-gate.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
+
+/** 可选模块的文件没装时跳过对应测试（只装核心循环时 CI 不会因 ENOENT 失败） */
+const optionalMissing = (p) => (existsSync(join(HERE, '../..', p)) ? false : `${p} 未安装（可选模块），跳过`);
 const issue = (labels, extra = {}) => ({ number: 3, labels: labels.map((name) => ({ name })), ...extra });
 const comment = (body, user = { login: 'someone', type: 'User' }) => ({ body, user });
 
@@ -56,7 +59,7 @@ test('命令行：写入 GITHUB_OUTPUT', () => {
   }
 });
 
-test('gpt-discuss.yml：评审任务只读、发评论任务不跑模型，并调用 discuss-gate.mjs', () => {
+test('gpt-discuss.yml：评审任务只读、发评论任务不跑模型，并调用 discuss-gate.mjs', { skip: optionalMissing('.github/workflows/gpt-discuss.yml') }, () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/gpt-discuss.yml'), 'utf8');
   const job = (name) => yml.match(new RegExp(`^  ${name}:\\n((?:(?: {4,}.*)?\\n)*)`, 'm'))?.[1] ?? '';
   const review = job('review');
