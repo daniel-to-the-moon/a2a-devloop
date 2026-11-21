@@ -69,7 +69,8 @@ jobs:
   review:
     needs: select
     if: github.ref == 'refs/heads/main' && needs.select.outputs.pr != ''
-    runs-on: ubuntu-latest
+    # codex-action 的 drop-sudo 在 ubuntu-26.04（ubuntu-latest）上失败（runner 不在 sudo 组），固定 24.04
+    runs-on: ubuntu-24.04
     # GPT 与 Claude 先后各审一次
     timeout-minutes: 75
     permissions:
