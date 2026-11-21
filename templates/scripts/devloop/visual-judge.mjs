@@ -195,7 +195,19 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
     } catch (e) {
       throw Object.assign(new Error(`连不上评分服务 ${new URL(url).host}：${netReason(e)}`), { transient: true });
     }
-    const body = await r.json().catch(() => ({}));
+    // 响应头到了不等于响应体也能读完：读响应体时的超时、连接中断同样算暂时故障；读完但不是 JSON 才是格式错误
+    let text;
+    try {
+      text = await r.text();
+    } catch (e) {
+      throw Object.assign(new Error(`读取评分服务响应失败 ${new URL(url).host}（HTTP ${r.status}）：${netReason(e)}`), { transient: true });
+    }
+    let body = {};
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      if (r.ok) throw new Error(`评分服务返回的不是 JSON（HTTP ${r.status}）：${text.slice(0, 200)}`);
+    }
     if (!r.ok) throw Object.assign(new Error(`模型调用失败 HTTP ${r.status}：${JSON.stringify(body?.error ?? body).slice(0, 300)}`), { transient: r.status === 429 || r.status >= 500 });
     if (body.stop_reason === 'refusal') throw new Error('模型拒绝回答');
     return body;

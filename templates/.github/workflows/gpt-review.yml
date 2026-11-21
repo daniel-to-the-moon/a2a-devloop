@@ -122,10 +122,20 @@ jobs:
         run: |
           set -uo pipefail
           url="${EP:-https://api.openai.com/v1/responses}"
+          # 默认 shell 带 -e：显式接住 curl 的退出码，DNS / TLS / 连接失败 / 超时也要把原因打出来（GPT 审核 #74 第 1 轮 major）
+          rc=0
           code=$(curl -sS -m 60 -o "$RUNNER_TEMP/probe.json" -w '%{http_code}' -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
-            -d "$(jq -n --arg m "$MODEL" '{model: $m, input: "reply OK", max_output_tokens: 16}')" "$url" 2> "$RUNNER_TEMP/probe.err")
-          echo "POST ${url%%\?*}（模型 $MODEL）→ HTTP $code $(head -c 300 "$RUNNER_TEMP/probe.err")"
-          [ "$code" = 200 ] || { echo "::warning::GPT 网关探测失败 HTTP $code：$(jq -rc '.error.message // .error // .' "$RUNNER_TEMP/probe.json" 2>/dev/null | head -c 300)"; exit 1; }
+            -d "$(jq -n --arg m "$MODEL" '{model: $m, input: "reply OK", max_output_tokens: 16}')" "$url" 2> "$RUNNER_TEMP/probe.err") || rc=$?
+          err=$(head -c 300 "$RUNNER_TEMP/probe.err" | tr '\n' ' ')
+          if [ "$rc" != 0 ]; then
+            echo "::warning::GPT 网关连不上（${url%%\?*}，curl 退出码 $rc）：$err"
+            exit 1
+          fi
+          echo "POST ${url%%\?*}（模型 $MODEL）→ HTTP $code"
+          if [ "$code" != 200 ]; then
+            echo "::warning::GPT 网关探测失败 HTTP $code：$(jq -rc '.error.message // .error // .' "$RUNNER_TEMP/probe.json" 2>/dev/null | head -c 300)"
+            exit 1
+          fi
       # 作者是 GPT 的 PR 不让 GPT 审（谁写的谁不审），只由下面的 Claude 审
       - name: GPT 审核
         if: needs.select.outputs.author != 'gpt'
