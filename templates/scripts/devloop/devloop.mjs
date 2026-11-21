@@ -20,7 +20,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runCi } from './ci.mjs';
 import { acquireLock, mergeAndPush, reviewCacheKey, uniqueDir, withWorktree } from './gitops.mjs';
-import { decide, eligible, hasTerminal, lastFindings, limitMode, roundsUsed, shouldReview } from './policy.mjs';
+import { decide, eligible, hasTerminal, isPaused, lastFindings, limitMode, roundsUsed, shouldReview } from './policy.mjs';
 import { createPrState } from './prstate.mjs';
 import { drainPending, followUpItems } from './followups.mjs';
 import { buildReviewPrompt, formatReview, touchesWorkflows, validateReview } from './review-format.mjs';
@@ -239,6 +239,15 @@ function roundLimitMode() {
   }
 }
 
+/** 全局暂停（仓库变量 DEVLOOP_PAUSED=true）：watch 每轮先查；判定见 policy.isPaused */
+function paused() {
+  try {
+    return isPaused({ value: gh(['variable', 'get', 'DEVLOOP_PAUSED']) });
+  } catch (e) {
+    return isPaused({ error: String(e.stderr || e.message || e) });
+  }
+}
+
 function cloudReviewOn() {
   try {
     return gh(['variable', 'get', 'CLOUD_REVIEW']).trim() === 'on';
@@ -250,6 +259,11 @@ function cloudReviewOn() {
 async function watch(intervalSec) {
   log(`watch 启动：间隔 ${intervalSec}s，审核模型 ${REVIEW_MODEL || 'Codex 默认'}，代码 ${git(['rev-parse', '--short', 'HEAD'])}`);
   for (;;) {
+    if (paused()) {
+      log('DEVLOOP_PAUSED 生效（或查询失败），本轮不审核、不合并');
+      await sleep(intervalSec * 1000);
+      continue;
+    }
     try {
       await processPending(); // 已合并 PR 的遗留意见 issue 没开齐的，每轮继续补
       const prs = JSON.parse(gh(['pr', 'list', '--state', 'open', '--base', 'main', '--json', 'number', '--limit', '50']));

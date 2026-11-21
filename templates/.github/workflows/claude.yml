@@ -7,6 +7,7 @@
 #   publish ：有写权限，但不检出、不执行任何仓库代码；只把 bundle 里的提交推到 claude/* 分支，并开 PR 或评论。
 # 依赖或测试脚本即使被污染，也拿不到能写仓库的令牌。（work 任务里仍有模型 API key，建议设用量上限。）
 # 审核与合并不在这里，由用户 Mac 上的审核方完成。
+# 开关（仓库变量）：DEVLOOP_PAUSED=true 全部暂停；DEVLOOP_REVIEWER=off 时不响应审核评论（只接执行者、审核方未接入时用）。
 name: claude
 
 on:
@@ -29,17 +30,19 @@ permissions: {}
 jobs:
   work:
     if: >-
+      vars.DEVLOOP_PAUSED != 'true' && (
       (github.event_name == 'issues' &&
        github.event.label.name == 'devloop' &&
        !contains(github.event.issue.labels.*.name, 'needs-user')) ||
       (github.event_name == 'issue_comment' &&
+       vars.DEVLOOP_REVIEWER != 'off' &&
        github.event.issue.pull_request &&
        github.event.comment.user.login == github.repository_owner &&
        startsWith(github.event.comment.body, '执行者：GPT') &&
        contains(github.event.comment.body, ' state=changes:') &&
        !contains(github.event.issue.labels.*.name, 'needs-user') &&
        !contains(github.event.issue.labels.*.name, 'hold')) ||
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     concurrency:
@@ -113,6 +116,8 @@ jobs:
           # 云端审核方用 GITHUB_TOKEN 手动触发本工作流时发起者是 github-actions 机器人，action 默认拒绝非人类发起。
           # 只对手动触发放行；打标签、评论仍只认人类。
           allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions' || '' }}
+          # 二选一：订阅令牌（Pro / Max 等，本机 `claude setup-token` 生成）或 Console API key。两者都设时按 API key 计费。
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
           # 完整输出（可选，仓库变量 CLAUDE_SHOW_FULL_OUTPUT=true 开启）：失败时日志里能看到实际报错。

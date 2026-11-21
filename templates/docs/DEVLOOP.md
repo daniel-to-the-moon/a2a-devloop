@@ -72,6 +72,17 @@ Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费
 - 需要 secret `OPENAI_API_KEY`；用网关时设变量 `GPT_RESPONSES_ENDPOINT`、`GPT_MODEL`。
 - GPT 只评审与提问，不拍板；用户给 `proposal` 加 `devloop` 即同意实现。
 
+## 开关（仓库变量）
+
+| 变量 | 作用 |
+|---|---|
+| `DEVLOOP_PAUSED=true` | 全部暂停：云端 Claude 不接新活，本机 watch 不审核不合并（查询失败也按暂停处理）。恢复：删掉变量或改成别的值 |
+| `DEVLOOP_REVIEWER=off` | 云端不响应审核评论（只用执行者、审核方未接入时）；修复改用手动 `gh workflow run claude.yml -f pr=<N>` |
+| `ROUND_LIMIT_MODE` | 见第五节 |
+| `CLAUDE_MODEL` / `ANTHROPIC_BASE_URL` | 模型 / 网关 |
+
+凭据二选一：`CLAUDE_CODE_OAUTH_TOKEN`（订阅令牌，本机 `claude setup-token`）或 `ANTHROPIC_API_KEY`；两者都设时按 API key 计费。订阅令牌与日常使用共用额度。
+
 ## 六、恢复
 
 1. 看 PR / issue 下的失败说明与 Actions 日志，排除原因；
@@ -82,3 +93,4 @@ Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费
 - `work` 任务里有模型 API key 并执行仓库代码，依赖投毒可能泄露该 key（拿不到写仓库令牌）→ 给 key 设用量上限。
 - 推送前最后核对与推送之间有很短的窗口；由 GitHub 强制需分支保护（私有仓库需付费套餐）。
 - 审核方本机关机 / 睡眠时不审核、不合并。
+- 用订阅令牌时，额度用完会导致云端秒退并加 needs-user；等额度重置后重跑。

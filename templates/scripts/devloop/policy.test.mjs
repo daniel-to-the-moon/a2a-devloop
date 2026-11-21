@@ -1,7 +1,7 @@
 // node --test scripts/devloop/*.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { decide, eligible, EXTRA_ROUNDS, lastFindings, limitMode, marker, MAX_CI_RETRIES, MAX_ROUNDS, parseMarkers, roundsUsed, shouldReview } from './policy.mjs';
+import { decide, eligible, EXTRA_ROUNDS, isPaused, lastFindings, limitMode, marker, MAX_CI_RETRIES, MAX_ROUNDS, parseMarkers, roundsUsed, shouldReview } from './policy.mjs';
 
 const KEY = 'test-key';
 const PR = 6;
@@ -192,4 +192,14 @@ test('auto：未到轮次上限时行为不变；changes 标记记下意见数 f
   // 带 f<n> 的标记签名可验证
   const c = { author: REV, body: `执行者：GPT\n${marker(KEY, { pr: PR, state: 'changes', reason: 'f3', head: H, base: B })}` };
   assert.deepEqual(parse([c]).map((m) => [m.state, m.reason]), [['changes', 'f3']]);
+});
+
+test('isPaused：DEVLOOP_PAUSED=true 暂停；变量不存在不暂停；其他查询错误按暂停（急停失效时宁可停）', () => {
+  assert.equal(isPaused({ value: 'true\n' }), true);
+  assert.equal(isPaused({ value: 'TRUE' }), true);
+  assert.equal(isPaused({ value: 'false' }), false);
+  assert.equal(isPaused({ value: '' }), false);
+  assert.equal(isPaused({ error: 'variable DEVLOOP_PAUSED was not found' }), false);
+  assert.equal(isPaused({ error: 'HTTP 404: Not Found' }), false);
+  assert.equal(isPaused({ error: 'error connecting to api.github.com' }), true);
 });
