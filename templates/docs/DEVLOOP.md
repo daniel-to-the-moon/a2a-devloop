@@ -54,7 +54,7 @@
 
 | 标签 | 含义 |
 |---|---|
-| `needs-user` | 循环停下等用户：同一 PR 5 轮未通过（`ROUND_LIMIT_MODE=needs-user`，默认）；auto 模式下出现 blocker 或意见数回升；同一提交 3 次基础设施问题；Claude 判断命中停止条件；云端执行失败 |
+| `needs-user` | 循环停下等用户：同一 PR 5 轮未通过（`ROUND_LIMIT_MODE=needs-user`，默认）；auto 模式下出现 blocker 或意见数回升；同一提交 3 次基础设施问题；Claude 判断命中停止条件；云端执行失败。这些评论会 @ 仓库所有者（GitHub 才会通知；环境变量 `DEVLOOP_NOTIFY` 可改成别人，设为空则不 @），等视觉验收的结果评论同样会 @ |
 | `hold` | 用户手动暂停某 PR |
 
 Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费 / 广告 / 对公众上线；需要新的付费服务或账号；需求互相矛盾或违反项目硬边界；信息不足。
@@ -84,12 +84,27 @@ Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费
 - **后续动作**：`GITHUB_TOKEN` 发的评论不会触发 `claude.yml`，所以需修改时 `decide` 直接 `workflow_dispatch` 修复；`GITHUB_TOKEN` 推 main 不触发 push 工作流，所以合并后 `decide` 触发 `ci.yml -f deploy_main=true` 完成发布。
 - **分工**：云端只审不改 `.github/workflows/` 的 PR；改工作流的 PR 由本机审核方或有权限的本地会话处理。
 - **信任边界**：不设 `pull_request` 入口；定时只用 main 上的定义，手动触发时各任务校验 `github.ref == refs/heads/main`。
-- **凭据**：`OPENAI_API_KEY`（+ 可选 `GPT_RESPONSES_ENDPOINT`、`GPT_MODEL`）、`ANTHROPIC_API_KEY`（+ 可选 `ANTHROPIC_BASE_URL`、`CLAUDE_REVIEW_MODEL`，未设沿用 `CLAUDE_MODEL`）、`DEVLOOP_MARKER_KEY`（与本机审核方同一把，两边审核记录互认）。
+- **凭据**：`OPENAI_API_KEY`（+ 可选 `GPT_RESPONSES_ENDPOINT`、`GPT_MODEL`）、`CLAUDE_CODE_OAUTH_TOKEN`（推荐：用户本机 `claude setup-token` 生成、自己 `gh secret set`；设了就不走网关）或 `ANTHROPIC_API_KEY`（+ 可选 `ANTHROPIC_BASE_URL`），可选 `CLAUDE_REVIEW_MODEL`（未设沿用 `CLAUDE_MODEL`）、`DEVLOOP_MARKER_KEY`（与本机审核方同一把，两边审核记录互认）。
 - **启动失败会自动重试**：审核任务本身失败（例如 runner 环境问题导致 codex-action 起不来）记为基础设施问题，下一轮扫描重试同一提交；同一提交累计 3 次才停下加 `needs-user`。
 
 ## 浏览器冒烟验收（可选）
 
 把 `scripts/e2e/smoke.example.mjs` 按产品核心路径改好、改名为 `scripts/e2e/smoke.mjs`，`ci.yml` 就会在构建后用 Playwright 打开构建产物跑一遍；失败即 CI 失败（不合并、不发布），截图作为 Actions 产物保留 7 天。项目需把 `playwright` 加进 devDependencies；预览命令可用仓库变量 `E2E_PREVIEW_CMD` 覆盖（须监听 `127.0.0.1:4173`）。
+
+## 验收与发布角色（可选，`scripts/devloop/gates.json`）
+
+模型互审只审代码。改画面的 PR 另外过五道：
+
+| 角色 | 谁来做 | 不通过时 |
+|---|---|---|
+| 性能验收 | `ci.yml` → `scripts/e2e/gates.mjs`：WebGL draw call / 三角形按固定场景比 `scripts/e2e/budgets.json` | CI 失败，交 Claude 修 |
+| 视觉验收 | `accept.yml` judge → `visual-judge.mjs`：截图 + 上一版截图 + `docs/visual/STYLE.md`（+ 参考图）交多模态模型打分，先做多模态自检 | 未达标交 Claude 修（最多 3 轮后 `needs-user`）；评分没完成不自动通过 |
+| 发布把关 | `cloud.mjs decide` + `accept.yml` preview：过审核与 CI 后发 Access 保护的预览 `pr-<编号>.<子域>`，加 `awaiting-acceptance` | 用户加 `accepted`（仓库所有者、晚于最新提交）才合并；正式站出问题：Actions → rollback |
+| 合并排期 | `cloud.mjs select`：与更早、在途的 PR 改同一文件就排队 | 前面的 PR 在等人时不挡队 |
+| 真机试玩 | 用户每个里程碑按 `.github/ISSUE_TEMPLATE/playtest.md` 在手机上玩一次 | 开 issue |
+
+评分方：仓库变量 `VISUAL_PROVIDER`（`openai` 默认 / `anthropic`）+ `VISUAL_MODEL`；写代码的是 Claude，默认不让它自评。
+标签：`awaiting-acceptance`（等用户看预览，云端审核不再处理）、`accepted`（用户确认，下一轮合并）。
 
 ## 发布与上线（可选）
 

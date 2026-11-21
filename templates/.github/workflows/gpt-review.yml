@@ -45,6 +45,8 @@ jobs:
       pr: ${{ steps.pick.outputs.pr }}
       head: ${{ steps.pick.outputs.head }}
       base: ${{ steps.pick.outputs.base }}
+      # PR 作者：gpt（本仓库 codex/* 分支）→ 只由 Claude 审；claude → GPT 审 + Claude 复核
+      author: ${{ steps.pick.outputs.author }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,7 +71,8 @@ jobs:
   review:
     needs: select
     if: github.ref == 'refs/heads/main' && needs.select.outputs.pr != ''
-    runs-on: ubuntu-latest
+    # codex-action 的 drop-sudo 在 ubuntu-26.04（ubuntu-latest）上失败（runner 不在 sudo 组），固定 24.04
+    runs-on: ubuntu-24.04
     # GPT 与 Claude 先后各审一次
     timeout-minutes: 75
     permissions:
@@ -107,7 +110,35 @@ jobs:
           REPO: ${{ github.repository }}
           DEVLOOP_MARKER_KEY: ${{ secrets.DEVLOOP_MARKER_KEY }}
         run: node _main/scripts/devloop/cloud.mjs prompt --pr "${{ needs.select.outputs.pr }}" --head "${{ needs.select.outputs.head }}" --base "${{ needs.select.outputs.base }}" --dir pr --out "$RUNNER_TEMP/prompt.md"
+      # 探测网关：Codex 失败时只报 “high demand / Reconnecting”，看不出是网关不通、key 无效还是模型不可用（2026-11-21 #67 连续失败）。
+      # 只打印 HTTP 状态与错误信息前 300 字，不打印 key。一次短调用，输出 token 上限设为 16；实际用量与费用待核实。失败不挡后面的步骤。
+      - name: 探测 GPT 网关
+        if: needs.select.outputs.author != 'gpt'
+        continue-on-error: true
+        env:
+          KEY: ${{ secrets.OPENAI_API_KEY }}
+          EP: ${{ vars.GPT_RESPONSES_ENDPOINT }}
+          MODEL: ${{ vars.GPT_MODEL }}
+        run: |
+          set -uo pipefail
+          url="${EP:-https://api.openai.com/v1/responses}"
+          # 默认 shell 带 -e：显式接住 curl 的退出码，DNS / TLS / 连接失败 / 超时也要把原因打出来（GPT 审核 #74 第 1 轮 major）
+          rc=0
+          code=$(curl -sS -m 60 -o "$RUNNER_TEMP/probe.json" -w '%{http_code}' -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+            -d "$(jq -n --arg m "$MODEL" '{model: $m, input: "reply OK", max_output_tokens: 16}')" "$url" 2> "$RUNNER_TEMP/probe.err") || rc=$?
+          err=$(head -c 300 "$RUNNER_TEMP/probe.err" | tr '\n' ' ')
+          if [ "$rc" != 0 ]; then
+            echo "::warning::GPT 网关连不上（${url%%\?*}，curl 退出码 $rc）：$err"
+            exit 1
+          fi
+          echo "POST ${url%%\?*}（模型 $MODEL）→ HTTP $code"
+          if [ "$code" != 200 ]; then
+            echo "::warning::GPT 网关探测失败 HTTP $code：$(jq -rc '.error.message // .error // .' "$RUNNER_TEMP/probe.json" 2>/dev/null | head -c 300)"
+            exit 1
+          fi
+      # 作者是 GPT 的 PR 不让 GPT 审（谁写的谁不审），只由下面的 Claude 审
       - name: GPT 审核
+        if: needs.select.outputs.author != 'gpt'
         uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13（标签指向的提交）
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -128,27 +159,32 @@ jobs:
       # 工具与设置来源的约束由 scripts/devloop/combine-review.test.mjs 读取本文件校验。
       # 结论缺失或不合法时本任务失败，decide 按“审核未完成”处理（计入同一提交 3 次上限），不会只凭 GPT 一方放行。
       - name: 安装 Claude Code（固定版本）
-        if: vars.SECOND_REVIEW != 'off'
+        if: vars.SECOND_REVIEW != 'off' || needs.select.outputs.author == 'gpt'
         run: npm install -g --no-audit --no-fund @anthropic-ai/claude-code@2.1.318
       - name: Claude 审核
-        if: vars.SECOND_REVIEW != 'off'
+        if: vars.SECOND_REVIEW != 'off' || needs.select.outputs.author == 'gpt'
         working-directory: pr
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+          # 鉴权同 claude.yml：有 CLAUDE_CODE_OAUTH_TOKEN 就用它、不走网关；否则 ANTHROPIC_API_KEY + 网关
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && secrets.ANTHROPIC_API_KEY || '' }}
+          ANTHROPIC_BASE_URL: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && vars.ANTHROPIC_BASE_URL || '' }}
           # 未设 CLAUDE_REVIEW_MODEL 时沿用执行者的 CLAUDE_MODEL；两个都没设则本步骤失败（按审核未完成处理）
           MODEL: ${{ vars.CLAUDE_REVIEW_MODEL || vars.CLAUDE_MODEL }}
           BASE_SHA: ${{ needs.select.outputs.base }}
+          AUTHOR: ${{ needs.select.outputs.author }}
         run: |
           set -euo pipefail
           [ -n "$ANTHROPIC_BASE_URL" ] || unset ANTHROPIC_BASE_URL
+          [ -n "$ANTHROPIC_API_KEY" ] || unset ANTHROPIC_API_KEY
+          [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || unset CLAUDE_CODE_OAUTH_TOKEN
           [ -n "$MODEL" ] || { echo "::error::未设仓库变量 CLAUDE_REVIEW_MODEL 或 CLAUDE_MODEL"; exit 1; }
           CTX="$RUNNER_TEMP/claude-ctx"
           mkdir -p "$CTX"
           git diff --stat "$BASE_SHA...HEAD" > "$CTX/stat.txt"
           git diff "$BASE_SHA...HEAD" > "$CTX/diff.patch"
           git log --no-color "$BASE_SHA..HEAD" > "$CTX/log.txt"
-          node ../_main/scripts/devloop/combine-review.mjs prompt --in "$RUNNER_TEMP/prompt.md" --ctx "$CTX" --out "$RUNNER_TEMP/claude-prompt.md"
+          node ../_main/scripts/devloop/combine-review.mjs prompt --in "$RUNNER_TEMP/prompt.md" --ctx "$CTX" --author "${AUTHOR:-claude}" --out "$RUNNER_TEMP/claude-prompt.md"
           claude -p "$(cat "$RUNNER_TEMP/claude-prompt.md")" \
             --model "$MODEL" \
             --max-turns 80 \
@@ -161,11 +197,14 @@ jobs:
             --strict-mcp-config \
             < /dev/null > "$RUNNER_TEMP/claude-result.json"
       - name: 合并两方结论
-        if: vars.SECOND_REVIEW != 'off'
+        if: vars.SECOND_REVIEW != 'off' && needs.select.outputs.author != 'gpt'
         run: |
           set -euo pipefail
           node _main/scripts/devloop/combine-review.mjs merge --gpt "$RUNNER_TEMP/review.json" --claude "$RUNNER_TEMP/claude-result.json" --out "$RUNNER_TEMP/combined.json"
           mv "$RUNNER_TEMP/combined.json" "$RUNNER_TEMP/review.json"
+      - name: Claude 结论作为唯一结论（作者是 GPT）
+        if: needs.select.outputs.author == 'gpt'
+        run: node _main/scripts/devloop/combine-review.mjs solo --claude "$RUNNER_TEMP/claude-result.json" --out "$RUNNER_TEMP/review.json"
       - name: 封装结论与元数据（工作流写入，不经模型）
         id: wrap
         env:
@@ -217,6 +256,7 @@ jobs:
           REPO: ${{ github.repository }}
           DEVLOOP_MARKER_KEY: ${{ secrets.DEVLOOP_MARKER_KEY }}
           GPT_MODEL: ${{ vars.GPT_MODEL }}
+          CLAUDE_REVIEW_MODEL: ${{ vars.CLAUDE_REVIEW_MODEL || 'claude-opus-5-5' }}
           REVIEW_RESULT: ${{ needs.review.result }}
           # 轮次用满后的处理（用户自选）：needs-user（默认，停下等用户）| auto（收敛则追加轮次，否则无 blocker 即合并并把遗留意见转 issue）
           ROUND_LIMIT_MODE: ${{ vars.ROUND_LIMIT_MODE }}

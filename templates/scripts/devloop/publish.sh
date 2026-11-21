@@ -8,15 +8,20 @@ mkdir -p "$OUT"
 if [ ! -f "$OUT/outcome" ]; then
   # 连产物都没有（work 任务整体失败 / 超时被取消）
   echo needs-user > "$OUT/outcome"
-  printf '执行者：Claude（devloop）\n\n云端执行任务失败或超时，没有产物，自动循环在此停下，请用户查看：%s\n' "$RUN_URL" > "$OUT/body.md"
+  printf '执行者：%s\n\n云端执行任务失败或超时，没有产物，自动循环在此停下，请用户查看：%s\n' "${WHO:-Claude（devloop）}" "$RUN_URL" > "$OUT/body.md"
 fi
 if [ "$(tr -d '[:space:]' < "$OUT/outcome")" != "pr" ]; then
+  # 停下等人：@ 负责人，GitHub 才会发通知（只加标签没人知道，见 review-format.mjs notifyLine）
+  who="${DEVLOOP_NOTIFY-${GITHUB_REPOSITORY_OWNER:-}}"
+  if [[ "$who" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]; then printf '\n@%s 自动循环已停下，需要你处理。\n' "$who" >> "$OUT/body.md"; fi
   gh issue comment "$N" -R "$REPO" --body-file "$OUT/body.md"
   gh issue edit "$N" -R "$REPO" --add-label needs-user
   echo "published=needs-user"
   exit 0
 fi
-case "$BRANCH" in claude/*) ;; *) echo "::error::拒绝推送到非 claude/* 分支：$BRANCH" >&2; exit 1 ;; esac
+PREFIX="${PREFIX:-claude}"
+case "$PREFIX" in claude | codex) ;; *) echo "::error::未知执行者前缀：$PREFIX" >&2; exit 1 ;; esac
+case "$BRANCH" in "$PREFIX"/*) ;; *) echo "::error::拒绝推送到非 $PREFIX/* 分支：$BRANCH" >&2; exit 1 ;; esac
 work=$(mktemp -d)
 git init -q "$work"
 cd "$work"
@@ -37,6 +42,18 @@ if [ "$MODE" != "fix" ]; then
     git -c user.name=claude-devloop -c user.email=claude-devloop@users.noreply.github.com rebase -q --onto "$main" "$START" \
       || { git rebase --abort 2>/dev/null || true; echo "::error::新提交无法干净地挪到当前 main 上（有冲突）" >&2; exit 1; }
     new=$(git rev-parse HEAD)
+  fi
+fi
+if [ "$MODE" = "fix" ]; then
+  # 修复期间分支已被别人推了新提交（例如作者手动修了同一轮意见）：本次修复基于旧头部，作废即可，
+  # 审核方会审新头部；不加 needs-user，免得让循环无谓停下（2026-11-21 #74 两次撞车）
+  remote_head=$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)
+  if [ -n "$remote_head" ] && [ "$remote_head" != "$START" ]; then
+    gh pr comment "$N" -R "$REPO" --body "执行者：${WHO:-Claude（devloop）}
+
+本次修复从 \`${START:0:8}\` 起跑，期间分支已更新到 \`${remote_head:0:8}\`，本次修复作废、不推送；审核方会审新的头部。运行：${RUN_URL:-}"
+    echo "published=superseded"
+    exit 0
   fi
 fi
 # 普通推送：分支在此期间被别人更新（非快进）则失败，不覆盖

@@ -63,11 +63,20 @@ const server = createServer((req, res) => {
       }
       return send(405, { success: false });
     }
+    // 假的正式发布列表与回滚（rollback.sh）：state.deploys = [{ id, ok, sha }]（新的在前）
+    const dep = req.url.match(/^\/accounts\/([^/]+)\/pages\/projects\/([^/]+)\/deployments(?:\/([^/?]+)\/rollback)?(?:\?.*)?$/);
+    if (dep) {
+      if (dep[1] !== ACCOUNT || req.headers.authorization !== 'Bearer tok' || state.deploysFail) return send(403, { success: false, errors: [{ message: 'forbidden' }] });
+      if (req.method === 'GET') return send(200, { success: true, result: (state.deploys ?? []).map((d) => ({ id: d.id, environment: 'production', created_on: 't', latest_stage: { status: d.ok ? 'success' : 'failure' }, deployment_trigger: { metadata: { commit_hash: d.sha } } })) });
+      if (req.method === 'POST' && dep[3]) { state.rolledBack = dep[3]; return send(200, { success: true, result: { id: 'new' } }); }
+      return send(405, { success: false });
+    }
     const m = req.url.match(/^\/accounts\/([^/]+)\/pages\/projects(?:\/([^/]+))?$/);
     if (!m || m[1] !== ACCOUNT || req.headers.authorization !== 'Bearer tok') return send(403, { success: false, errors: [{ message: 'forbidden' }] });
     if (req.method === 'GET' && m[2]) {
       const p = state.projects.find((x) => x === m[2]); // 精确按名字
-      return p ? send(200, { success: true, result: { name: p, subdomain: `${p}.pages.dev` } }) : send(404, { success: false, errors: [{ message: 'not found' }] });
+      const canonical = state.active ? { canonical_deployment: { id: state.active } } : {};
+      return p ? send(200, { success: true, result: { name: p, subdomain: `${p}.pages.dev`, ...canonical } }) : send(404, { success: false, errors: [{ message: 'not found' }] });
     }
     if (req.method === 'POST' && !m[2]) {
       if (state.createFails) return send(400, { success: false, errors: [{ message: 'name taken' }] });
@@ -388,4 +397,61 @@ test('ci.yml 与 analytics-retention.yml 传同一个 RETENTION_DAYS 给清理�
   const step = ci.slice(ci.indexOf('- name: 发布到 Cloudflare Pages'));
   assert.ok(step.slice(0, step.indexOf('run: bash _devloop/scripts/devloop/pages.sh')).includes(expr), 'ci.yml 发布步骤没传 RETENTION_DAYS');
   assert.ok(readFileSync(join(HERE, '../../.github/workflows/analytics-retention.yml'), 'utf8').includes(expr));
+});
+
+test('PR 预览（PREVIEW_BRANCH）：发到 pr-<编号> 分支、不查 main 最新、不带统计；正式站公开也要求预览受 Access 保护', async () => {
+  const t = setup({ projects: ['my-app'], latest: 'other' });
+  const r = await t.run({ DEPLOY: 'true', PREVIEW_BRANCH: 'pr-69', SHA: 'a'.repeat(40), ANALYTICS: 'on', FUNCTIONS_DIR: t.fdir });
+  assert.equal(r.code, 0, r.err);
+  assert.match(t.wrangler(), /pages deploy \S+ --project-name my-app --branch pr-69 --commit-hash a{40}/);
+  assert.match(r.out, /^preview=https:\/\/pr-69\.my-app\.pages\.dev$/m);
+  assert.equal(t.read('deployed-functions'), '');
+  assert.ok(!state.calls.some((c) => c.includes('/d1/')), '预览不碰 D1');
+  const open = setup({ projects: ['my-app'], access: { '*': 'open' } });
+  const o = await open.run({ DEPLOY: 'true', PUBLIC: 'true', PREVIEW_BRANCH: 'pr-69' });
+  assert.notEqual(o.code, 0);
+  assert.match(o.err, /预览地址 pr-69\.my-app\.pages\.dev 未确认受/);
+  assert.equal(open.wrangler(), '');
+  for (const bad of ['main', 'pr-0', 'pr-1;rm', 'feature']) {
+    const b = setup({ projects: ['my-app'] });
+    assert.notEqual((await b.run({ DEPLOY: 'true', PREVIEW_BRANCH: bad })).code, 0, bad);
+    assert.equal(b.wrangler(), '', bad);
+  }
+});
+
+test('一键回滚（rollback.sh）：以当前生效发布为准回到它的上一版；可指定（含比当前更新的）；没有上一版或 ID 不在列表里就失败', async () => {
+  const t = setup({ projects: ['my-app'] });
+  state.deploys = [{ id: 'd3', ok: true, sha: 'c3' }, { id: 'd2', ok: false, sha: 'c2' }, { id: 'd1', ok: true, sha: 'c1aaaaaaaa' }];
+  state.active = 'd3';
+  const r = await t.run({}, 'rollback.sh');
+  assert.equal(r.code, 0, r.err);
+  assert.equal(state.rolledBack, 'd1', '跳过失败的发布');
+  assert.match(t.summary(), /d3 → d1（提交 c1aaaaaa）/);
+  // 之前已回滚到 d2：默认回到 d2 之前的 d1；也可以切回更新的 d3
+  const after = setup({ projects: ['my-app'] });
+  state.deploys = [{ id: 'd3', ok: true }, { id: 'd2', ok: true }, { id: 'd1', ok: true }];
+  state.active = 'd2';
+  assert.equal((await after.run({}, 'rollback.sh')).code, 0);
+  assert.equal(state.rolledBack, 'd1');
+  const fwd = setup({ projects: ['my-app'] });
+  state.deploys = [{ id: 'd3', ok: true }, { id: 'd2', ok: true }, { id: 'd1', ok: true }];
+  state.active = 'd1';
+  assert.equal((await fwd.run({ TARGET: 'd3' }, 'rollback.sh')).code, 0);
+  assert.equal(state.rolledBack, 'd3', '当前是 d1 时 d3 不是“已生效”');
+  for (const [deploys, active, env] of [[[{ id: 'd3', ok: true }], 'd3', {}], [[{ id: 'd3', ok: true }, { id: 'd1', ok: true }], 'd3', { TARGET: 'dead' }], [[{ id: 'd3', ok: true }], 'd3', { TARGET: 'x;y' }], [[{ id: 'd3', ok: true }, { id: 'd1', ok: true }], undefined, {}]]) {
+    const f = setup({ projects: ['my-app'] });
+    state.deploys = deploys;
+    state.active = active;
+    const out = await f.run(env, 'rollback.sh');
+    assert.notEqual(out.code, 0, JSON.stringify(env));
+    assert.equal(state.rolledBack, undefined);
+  }
+  const same = setup({ projects: ['my-app'] });
+  state.deploys = [{ id: 'd3', ok: true }, { id: 'd1', ok: true }];
+  state.active = 'd3';
+  assert.equal((await same.run({ TARGET: 'd3' }, 'rollback.sh')).code, 0);
+  assert.equal(state.rolledBack, undefined, '目标就是当前发布：不调用回滚');
+  const denied = setup({ projects: ['my-app'] });
+  state.deploysFail = true;
+  assert.notEqual((await denied.run({}, 'rollback.sh')).code, 0);
 });

@@ -107,13 +107,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OUT: ${{ runner.temp }}/devloop
           # 模型网关（可选仓库变量）：key 来自兼容 Anthropic API 的网关时设置；为空时走官方地址
-          ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+          # 鉴权：有 CLAUDE_CODE_OAUTH_TOKEN（`claude setup-token` 生成，用户订阅）就用它，并且不走网关；没有才用 ANTHROPIC_API_KEY + 网关
+          ANTHROPIC_BASE_URL: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && vars.ANTHROPIC_BASE_URL || '' }}
         with:
           path_to_bun_executable: ${{ steps.bun.outputs.path }}
           # 云端审核方用 GITHUB_TOKEN 手动触发本工作流时发起者是 github-actions 机器人，action 默认拒绝非人类发起。
           # 只对手动触发放行；打标签、评论仍只认人类。
           allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions' || '' }}
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN == '' && secrets.ANTHROPIC_API_KEY || '' }}
           github_token: ${{ github.token }}
           # 完整输出（可选，仓库变量 CLAUDE_SHOW_FULL_OUTPUT=true 开启）：失败时日志里能看到实际报错。
           # 日志含全部工具执行结果；以 secrets 登记的密钥会被 GitHub 自动打码。公开仓库不要开启。
@@ -134,11 +136,13 @@ jobs:
               改了 scripts/devloop 时 `node --test scripts/devloop/*.test.mjs`；纯文档改动不需要 npm。不通过就继续修，不要提交失败的代码。
             - 不要合并、不要审核自己的改动。
 
-            implement 模式：用 `gh issue view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --comments` 读 issue。
+            implement 模式：用 `gh issue view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --json title,body,comments` 读 issue（只用 --json，不带 --json 的 gh view 会查本任务无权读的字段而报错）。
               命中 docs/DEVLOOP.md 第五节任一停止条件或信息不足 → outcome 写 needs-user，body.md 写原因，不改代码。
               否则实现需求并为新增或改动的逻辑写测试，本地 commit；body.md 写明改了什么、怎么验证、哪些是提案值，末尾 `Closes #${{ github.event.issue.number || inputs.pr || inputs.issue }}`。
 
-            fix 模式：用 `gh pr view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --comments` 读 PR，以最新一条“执行者：GPT”评论为准。
+            fix 模式：用 `gh pr view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --json title,body,headRefName,comments` 读 PR（不带 --json 会查 statusCheckRollup，本任务无权读），以最新一条“执行者：GPT”评论为准；
+              若最新的是“执行者：devloop（视觉验收）”且结论为未达标，就按其中的评分意见改画面（截图在评论里 Actions 链接的产物中，
+              风格目标见 docs/visual/STYLE.md），仍遵守项目的素材规则与性能预算（scripts/e2e/budgets.json）。
               逐条处理 blocker 与 major；minor 合理就改；不同意的给出依据，不要静默忽略。
               测试失败时用评论里 Actions 链接的运行号执行 `gh run view <运行号> --log-failed` 看日志；冲突时 `git merge origin/main` 解决。
               本地 commit；body.md 逐条列出每个意见的处理结果。
@@ -228,5 +232,7 @@ jobs:
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           printf '执行者：Claude（devloop）\n\n发布步骤失败（分支：%s）。可能是推送被拒（分支在此期间被更新）或开 PR / 评论失败。自动循环在此停下，请用户查看：%s\n' "${BRANCH:-未知}" "$RUN_URL" > report.md
+          # @ 仓库所有者：GitHub 才会发通知（只加标签没人知道）
+          printf '\n@%s 自动循环已停下，需要你处理。\n' "$GITHUB_REPOSITORY_OWNER" >> report.md
           gh issue comment "$N" -R "$REPO" --body-file report.md || true
           gh issue edit "$N" -R "$REPO" --add-label needs-user || true

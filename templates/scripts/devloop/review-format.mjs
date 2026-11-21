@@ -40,14 +40,22 @@ export function buildReviewPrompt({ header, pr, meta, base, stat }) {
   ].join('\n');
 }
 
-export function formatReview({ key, model, where, pr, head, review, ci, d }) {
+/**
+ * PR 的作者是谁：本仓库 codex/* 分支 = GPT（codex.yml 或 Codex 云端经 @codex 开的 PR），其余 = Claude。
+ * 作者决定审核方：谁写的谁不审（GPT 写的由 Claude 独立审，Claude 写的由 GPT 审、Claude 另一会话复核），修复也交回作者。
+ */
+export const prAuthor = (pr) => (!pr?.isCrossRepository && /^codex\//.test(pr?.headRefName ?? '') ? 'gpt' : 'claude');
+/** 需修改时交给哪个执行者修：作者本人 */
+export const fixWorkflow = (author) => (author === 'gpt' ? 'codex.yml' : 'claude.yml');
+
+export function formatReview({ key, model, where, pr, head, review, ci, d, author = 'claude' }) {
   const sev = { blocker: '🛑 blocker', major: '⚠️ major', minor: '💬 minor' };
   const findings = review.findings.length
     ? review.findings.map((f, i) => `${i + 1}. **${sev[f.severity]}** \`${f.file}:${f.line}\`\n   - 问题：${f.issue}\n   - 建议：${f.suggestion}`).join('\n')
     : '无。';
   const ciText = { ok: '✅ 通过', failed: '❌ 失败', error: '⚠️ 未完成' }[ci.status];
   return [
-    `执行者：GPT（${model}，${where}；独立于代码执行者 Claude）`,
+    author === 'gpt' ? `执行者：Claude 审核（${model}，${where}；代码作者是 GPT，由 Claude 独立审核，GPT 不审自己写的代码）` : `执行者：GPT（${model}，${where}；独立于代码执行者 Claude）`,
     '',
     `**结论：${review.verdict === 'approve' ? '✅ 通过' : review.verdict === 'error' ? '⚠️ 审核未完成' : '🔁 需修改'}**（审核提交 \`${head.slice(0, 8)}\`）`,
     '',
@@ -103,4 +111,14 @@ export function followUpIssues({ pr, head, findings }) {
     ].join('\n');
     return { title, body };
   });
+}
+
+/**
+ * 停下等人时 @ 提醒负责人（GitHub 会给被 @ 的人发通知 / 邮件）。只加标签和评论不会提醒任何人：
+ * （曾发生：模型网关账号被停用，云端修复连续失败停下一天多才被发现。）
+ * 被提醒的人：DEVLOOP_NOTIFY（设为空字符串 = 不提醒）> GITHUB_REPOSITORY_OWNER > fallback（本机传仓库所有者）。
+ */
+export function notifyLine(env = process.env, fallback = '', why = '自动循环已停下，需要你处理') {
+  const who = env.DEVLOOP_NOTIFY ?? (env.GITHUB_REPOSITORY_OWNER || fallback);
+  return who && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(who) ? `\n\n@${who} ${why}。` : '';
 }

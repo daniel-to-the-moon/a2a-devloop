@@ -20,7 +20,8 @@ import { mergeAndPush } from './gitops.mjs';
 import { decide, eligible, hasTerminal, lastFindings, limitMode, roundsUsed, shouldReview } from './policy.mjs';
 import { createPrState } from './prstate.mjs';
 import { ensureFollowUps, followUpItems } from './followups.mjs';
-import { buildReviewPrompt, formatReview, touchesWorkflows, validateReview } from './review-format.mjs';
+import { buildReviewPrompt, fixWorkflow, formatReview, notifyLine, prAuthor, touchesWorkflows, validateReview } from './review-format.mjs';
+import { acceptanceGate, compareFiles, followUpsAccept, isInFlight, loadGates, ownerAcceptance, queueBlocker, runIdOf } from './accept.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts }).trim();
@@ -30,19 +31,32 @@ const out = (kv) => {
   process.stdout.write(text);
 };
 
-/** 选择逻辑（纯函数，便于测试）：按编号从小到大，取第一个需要审、且不改工作流的 PR */
-export function pickPr(states) {
+/**
+ * 选择逻辑（纯函数，便于测试）：按编号从小到大，取第一个需要审、且不改工作流的 PR。
+ * gates（gates.json，可省略 = 不启用验收与排期）：
+ *   - 等用户视觉验收（带 waitLabel、还没有 acceptLabel）的 PR 不审，免得反复花审核费用；
+ *   - 合并排期：与编号更小、仍在途的 PR 改了同一文件 → 排队等它合完（accept.mjs queueBlocker）。
+ */
+export function pickPr(states, gates = null) {
   for (const m of [...states].sort((a, b) => a.number - b.number)) {
     if (!shouldReview({ head: m.headRefOid, labels: m.labels, markers: m.markers, pr: m })) continue;
     if (touchesWorkflows(m.files)) continue;
+    if (gates && !isInFlight(m, gates.visual)) continue;
+    if (gates && queueBlocker(m, states, gates.visual)) continue;
     return m;
   }
   return null;
 }
 
+/** 从 Actions 运行地址取运行号 */
+export { runIdOf };
+
 /** 合并后的后续：需修改 → 直接触发云端 Claude 修复（GITHUB_TOKEN 发的评论不会触发 issue_comment 工作流）；合并 → 触发部署 */
-export function followUps(state, pr) {
-  if (state === 'changes') return [['workflow', 'run', 'claude.yml', '-f', `pr=${pr}`]];
+export function followUps(state, pr, accept = null, author = 'claude') {
+  // 需修改：交回作者修（Claude 写的 → claude.yml；GPT 写的 → codex.yml）
+  if (state === 'changes') return [['workflow', 'run', fixWorkflow(author), '-f', `pr=${pr}`]];
+  // 改画面的 PR 审核与测试都通过：发预览 + 视觉评分（accept.yml），等用户确认
+  if (state === 'retry' && accept) return followUpsAccept(pr, accept);
   if (state === 'merged') return [['workflow', 'run', 'ci.yml', '--ref', 'main', '-f', 'deploy_main=true']];
   return [];
 }
@@ -73,7 +87,7 @@ async function withRetry(fn, { attempts, sleep, delayMs }) {
  * - 每个动作有界重试；最终仍失败 → 给 PR 加 needs-user，并（尽力）发一条说明，写明要手动执行的命令，然后抛错让本次运行失败。
  *   不会重复合并（合并已完成），也不新增审核标记（不累计轮次）。
  */
-export async function finalize({ ghR, pr, state, body, writeBody, issues = [], listIssues = () => [], attempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), delayMs = 5000 }) {
+export async function finalize({ ghR, pr, state, body, writeBody, accept = null, author = 'claude', issues = [], listIssues = () => [], attempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), delayMs = 5000 }) {
   const failed = [];
   const tryDo = async (label, args) => {
     try {
@@ -84,7 +98,7 @@ export async function finalize({ ghR, pr, state, body, writeBody, issues = [], l
   };
   const comment = () => tryDo('发审核评论', ['pr', 'comment', String(pr), '--body-file', writeBody(body)]);
   const follow = async () => {
-    for (const a of followUps(state, pr)) await tryDo(state === 'merged' ? '触发部署' : '触发云端 Claude 修复', a);
+    for (const a of followUps(state, pr, accept, author)) await tryDo(state === 'merged' ? '触发部署' : accept ? '触发预览与视觉验收' : (author === 'gpt' ? '触发云端 GPT 修复' : '触发云端 Claude 修复'), a);
   };
   if (state === 'merged') {
     await follow();
@@ -107,12 +121,12 @@ export async function finalize({ ghR, pr, state, body, writeBody, issues = [], l
   } else {
     await comment();
     if (!failed.length) await follow(); // 评论没发出去就不触发修复（Claude 读不到意见）
-    else failed.push(...followUps(state, pr).map((a) => ({ label: '未触发（评论失败）', cmd: `gh ${a.join(' ')}`, err: '' })));
+    else failed.push(...followUps(state, pr, accept, author).map((a) => ({ label: '未触发（评论失败）', cmd: `gh ${a.join(' ')}`, err: '' })));
   }
   if (!failed.length) return;
   const note = ['执行者：devloop（云端审核）', '', `以下动作重试 ${attempts} 次后仍失败，自动循环在此停下（已加 needs-user）。排除原因后手动执行：`, '',
     ...failed.map((f) => `- ${f.label}：\`${f.cmd}\`${f.err ? `（${f.err}）` : ''}`),
-    ...(failed.some((f) => f.label === '发审核评论') ? ['', '审核评论未能发出；可手动重跑本次云端审核：`gh workflow run gpt-review.yml -f pr=' + pr + '`'] : [])].join('\n');
+    ...(failed.some((f) => f.label === '发审核评论') ? ['', '审核评论未能发出；可手动重跑本次云端审核：`gh workflow run gpt-review.yml -f pr=' + pr + '`'] : [])].join('\n') + notifyLine();
   try { ghR(['pr', 'edit', String(pr), '--add-label', 'needs-user']); } catch { /* 尽力 */ }
   try { ghR(['pr', 'comment', String(pr), '--body-file', writeBody(note)]); } catch { /* 尽力 */ }
   throw new Error(`后续动作失败：${failed.map((f) => f.label).join('、')}`);
@@ -159,7 +173,7 @@ export async function runDecide({ pr, head, base, reviewResult, reviewPath, meta
   if (touchesWorkflows(now.files)) return { state: 'skipped', reason: '改动工作流文件，交给本机审核方' };
   // 该 head 已有终态标记（decide 重放，或审核期间另一个审核方已写入 changes / merged / stopped）→ 不再判定、不评论、不触发
   if (hasTerminal(now.markers, head)) return { state: 'skipped', reason: '该提交已有审核终态标记' };
-  const d = decide({
+  let d = decide({
     ci,
     review,
     now: { labels: now.labels, base: io.mainSha(), mergeable: now.mergeable, state: now.state, isDraft: now.isDraft, baseRefName: now.baseRefName },
@@ -169,6 +183,9 @@ export async function runDecide({ pr, head, base, reviewResult, reviewPath, meta
     mode: limitMode(io.limitMode),
     prevFindings: lastFindings(now.markers),
   });
+  // 发布把关（gates.json）：改画面的 PR 合并前要用户确认（accept.mjs acceptanceGate，本机 devloop.mjs 用同一个）
+  let accept = null;
+  ({ d, accept } = acceptanceGate({ d, pr, head, base: ci.base, mainChanged: io.mainChanged, files: now.files, markers: now.markers, gates: io.gates, acceptance: io.acceptance, ghR: io.ghR, runUrl: ci.url }));
   if (d.addLabel) io.ghR(['pr', 'edit', String(pr), '--add-label', d.addLabel]);
   if (d.merge) {
     try {
@@ -191,10 +208,13 @@ export async function runDecide({ pr, head, base, reviewResult, reviewPath, meta
       d.text = `审核与测试都通过，但合并未完成（${String(e.message).split('\n')[0]}），下一轮重试。`;
     }
   }
+  if (d.addLabel === 'needs-user') d.text += notifyLine(io.env ?? process.env);
+  const author = prAuthor(now);
   const body = formatReview({
+    author,
     key: io.key,
-    model: io.model,
-    where: '云端审核，openai/codex-action',
+    model: author === 'gpt' ? (io.claudeModel ?? 'Claude') : io.model,
+    where: author === 'gpt' ? '云端审核，Claude Code 只读' : '云端审核，openai/codex-action',
     pr,
     head,
     review: review ?? { verdict: 'error', summary: `GPT 审核未能完成：${reviewError}`, findings: [] },
@@ -202,7 +222,7 @@ export async function runDecide({ pr, head, base, reviewResult, reviewPath, meta
     d,
   });
   const issues = d.state === 'merged' && d.followUpFindings?.length ? followUpItems({ pr, head, findings: d.followUpFindings }) : [];
-  await finalize({ ghR: io.ghR, pr, state: d.state, body, writeBody: io.writeBody, issues, listIssues: io.listIssues, ...(io.sleep ? { sleep: io.sleep } : {}) });
+  await finalize({ ghR: io.ghR, pr, state: d.state, body, writeBody: io.writeBody, accept, author, issues, listIssues: io.listIssues, ...(io.sleep ? { sleep: io.sleep } : {}) });
   return { state: d.state, ci: ci.status, verdict: review?.verdict ?? 'error' };
 }
 
@@ -232,9 +252,9 @@ async function main() {
     const only = arg('pr');
     const numbers = only ? [Number(only)] : JSON.parse(ghR(['pr', 'list', '--state', 'open', '--base', 'main', '--json', 'number', '--limit', '50'])).map((p) => p.number);
     const states = numbers.map((n) => ({ number: n, ...prState(n) }));
-    const m = pickPr(states);
-    if (!m) return out({ pr: '', head: '', base: '', reason: '没有需要云端审核的 PR' });
-    return out({ pr: m.number, head: m.headRefOid, base: mainSha(), reason: `审核 #${m.number}` });
+    const m = pickPr(states, loadGates());
+    if (!m) return out({ pr: '', head: '', base: '', author: '', reason: '没有需要云端审核的 PR' });
+    return out({ pr: m.number, head: m.headRefOid, base: mainSha(), author: prAuthor(m), reason: `审核 #${m.number}（作者 ${prAuthor(m) === 'gpt' ? 'GPT，由 Claude 审' : 'Claude，由 GPT 审'}）` });
   }
 
   if (cmd === 'prompt') {
@@ -266,11 +286,16 @@ async function main() {
       {
         key: KEY,
         model: process.env.GPT_MODEL || 'GPT',
+        claudeModel: process.env.CLAUDE_REVIEW_MODEL || 'claude-opus-5-5',
         limitMode: process.env.ROUND_LIMIT_MODE,
         listIssues: () => listDevloopIssues(gh, REPO),
         ghR,
         prState,
         mainSha,
+        gates: loadGates(),
+        // accepted 标签：最后一次由仓库所有者打上、且晚于当前 head 的“等待验收”标记才算数（accept.mjs acceptanceState）
+        mainChanged: compareFiles({ gh, repo: REPO }),
+        acceptance: ownerAcceptance({ gh, repo: REPO, owner: trustedReviewer(process.env), label: loadGates()?.visual.acceptLabel }),
         runCi: (p) => runCi({ ...p, io: ciIo, timeoutMs: 30 * 60_000 }),
         fetch: (pr) => sh('git', ['fetch', '-q', 'origin', 'main', `pull/${pr}/head`]),
         mergeAndPush: (opts) => mergeAndPush({ repoDir: process.cwd(), home: mkdtempSync(join(tmpdir(), 'cloud-merge-')), ...opts }),
