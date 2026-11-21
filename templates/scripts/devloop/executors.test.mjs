@@ -85,7 +85,12 @@ test('gpt-review.yml 网关探测：在默认 bash -e 下，连不上与 HTTP �
   const http = probe(`${outFile}; echo '{"error":{"message":"model not found"}}' > "$f"; printf 503`);
   assert.notEqual(http.status, 0);
   assert.match(http.stdout, /HTTP 503.*model not found/);
-  const ok = probe(`${outFile}; echo '{}' > "$f"; printf 200`);
+  const ok = probe(`${outFile}; if printf '%s ' "$@" | grep -qE '"stream": *true'; then printf 'event: x\\ndata: {"type":"response.created"}\\n\\ndata: {"type":"response.completed"}\\n' > "$f"; else echo '{}' > "$f"; fi; printf 200`);
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.match(ok.stdout, /流式 POST.*HTTP 200.*response\.completed/);
+  // 非流式 200、流式中途断开（只有 created，没有 completed）：报出流式不完整
+  const cut = probe(`${outFile}; if printf '%s ' "$@" | grep -qE '"stream": *true'; then printf 'data: {"type":"response.created"}\\n' > "$f"; printf 200; exit 18; else echo '{}' > "$f"; printf 200; fi`);
+  assert.notEqual(cut.status, 0);
+  assert.match(cut.stdout, /流式调用不完整.*curl 18/);
   assert.ok(![dns, http, ok].some((r) => (r.stdout + r.stderr).includes('sk-test')), '不打印 key');
 });

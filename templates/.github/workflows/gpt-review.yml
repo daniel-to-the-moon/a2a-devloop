@@ -136,6 +136,17 @@ jobs:
             echo "::warning::GPT 网关探测失败 HTTP $code：$(jq -rc '.error.message // .error // .' "$RUNNER_TEMP/probe.json" 2>/dev/null | head -c 300)"
             exit 1
           fi
+          # 再按 Codex 的用法探一次：流式（SSE）+ 与审核相同的推理强度。2026-11-21 #67：上面的非流式调用 200，
+          # Codex 仍重连 5 次后报 high demand，怀疑网关对流式或该推理强度的支持有问题。只打印事件类型，不打印内容。
+          rc=0
+          code=$(curl -sS -N -m 120 -o "$RUNNER_TEMP/probe.sse" -w '%{http_code}' -H "Authorization: Bearer $KEY" -H 'content-type: application/json' -H 'accept: text/event-stream' \
+            -d "$(jq -n --arg m "$MODEL" '{model: $m, input: "reply OK", max_output_tokens: 64, stream: true, reasoning: {effort: "high"}}')" "$url" 2> "$RUNNER_TEMP/probe.err") || rc=$?
+          events=$(grep -oE '"type": ?"[a-z_.]+"' "$RUNNER_TEMP/probe.sse" 2>/dev/null | sed -E 's/.*"([a-z_.]+)"$/\1/' | grep -E '^(response|error)' | sort | uniq -c | tr '\n' ' ' | head -c 400 || true)
+          echo "流式 POST（模型 $MODEL，effort high）→ curl $rc，HTTP $code，事件：${events:-无}"
+          if [ "$rc" != 0 ] || [ "$code" != 200 ] || ! grep -qE '"type": ?"response\.(completed|incomplete)"' "$RUNNER_TEMP/probe.sse"; then
+            echo "::warning::GPT 网关流式调用不完整：curl $rc，HTTP $code，$(head -c 200 "$RUNNER_TEMP/probe.err" | tr '\n' ' ')$(grep -oE '"message": ?"[^"]{0,200}' "$RUNNER_TEMP/probe.sse" 2>/dev/null | head -1)"
+            exit 1
+          fi
       # 作者是 GPT 的 PR 不让 GPT 审（谁写的谁不审），只由下面的 Claude 审
       - name: GPT 审核
         if: needs.select.outputs.author != 'gpt'
