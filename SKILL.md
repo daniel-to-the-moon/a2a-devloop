@@ -1,11 +1,13 @@
 ---
 name: a2a-devloop
-description: 为一个 GitHub 仓库搭建“多 agent 自主开发循环”（A2A devloop）：Claude 在 GitHub Actions 里按 issue 写代码、开 PR、按审核意见修复；GPT（本机 Codex CLI 或云端 codex-action）只读审核，可加 Claude 第二审核方；CI 测试合并后的代码并做浏览器冒烟验收；全部通过即自动合并，可选自动发布到 Cloudflare Pages（预览受 Access 保护、正式地址由用户开关公开）与自建匿名统计；卡住时打 needs-user 等人。用户说“搭一个 agent 互审自动合并的流程”“Claude 写 GPT 审”“A2A 开发循环”“devloop”“自动审核自动合码”“不想当 agent 之间的传话人”时使用。也用于“合并即发布”“预览和正式环境分开”“公开上线”“加匿名统计”，以及排查已搭好的 devloop（云端 Claude 秒退、CI 等不到、PR 卡住不审、发布失败）。
+description: 为一个 GitHub 仓库搭建“多 agent 自主开发循环”（A2A devloop）：Claude 在 GitHub Actions 里按 issue 写代码、开 PR、按审核意见修复；GPT（本机 Codex CLI 或云端 codex-action）只读审核，可加 Claude 第二审核方；CI 测试合并后的代码并做浏览器冒烟验收；全部通过即自动合并，可选自动发布到 Cloudflare Pages（预览受 Access 保护、正式地址由用户开关公开）与自建匿名统计；卡住时打 needs-user 等人。用户说“搭一个 agent 互审自动合并的流程”“Claude 写 GPT 审”“A2A 开发循环”“devloop”“自动审核自动合码”“不想当 agent 之间的传话人”“让 GPT 当主设 / 让 Codex 接活”时使用。也用于“合并即发布”“预览和正式环境分开”“公开上线”“加匿名统计”，以及排查已搭好的 devloop（云端 Claude 秒退、CI 等不到、PR 卡住不审、发布失败）。
 ---
 
 # A2A devloop：Claude 写、GPT 审、自动合并
 
 目标：用户只提 issue、只做“人必须做的决定”，agent 之间不需要人传话。
+
+**铁律：agent 之间只通过 GitHub 协作**（issue、PR、评论、标签、`workflow_dispatch`、PR 事件）。不用浏览器、桌面客户端或任何电脑操作（computer use）在 agent 之间转告、派活或取结果——又贵又慢、依赖用户电脑在线登录、不留痕。会话里需要另一个模型动手时，也是开 issue 打标签、评论 `@codex`、或 `gh workflow run`，不是去点它的网页。
 
 ```
 issue(devloop 标签) → [云端] Claude work(只读) → publish(写，不跑代码) → PR
@@ -21,7 +23,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
    预览 *.<项目>.pages.dev 始终受 Access 保护；正式地址 PAGES_PUBLIC=true 才公开；ANALYTICS=on 连同 D1 匿名统计一起发布
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test templates/scripts/devloop/*.test.mjs` 164 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test templates/scripts/devloop/*.test.mjs` 170 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 零、适用场景（先判断该不该用这套）
 
@@ -121,7 +123,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 |---|---|---|
 | 性能验收 | `scripts/e2e/gates.example.mjs` → `gates.mjs`、`budgets.example.json` → `budgets.json`、`gates-lib.mjs` | CI 里给 WebGL `draw*` 计数（页面脚本运行前注入，不依赖项目的调试钩子），固定场景超预算即 CI 失败；同时出固定机位截图与手机竖屏模拟截图 |
 | 视觉验收 | `scripts/devloop/visual-judge.mjs`、`docs/visual/STYLE.md`、可选 `docs/visual/reference.png` | 截图 + main 上一版截图 + 风格说明交多模态模型打五项分；**先做多模态自检**（程序生成的四色方块图，答错 = 这个模型看不了图，结果一律不放行） |
-| 发布把关 | `accept.yml`、`scripts/devloop/accept.mjs`、`pages.sh` 的 `PREVIEW_BRANCH`、`rollback.yml` + `rollback.sh` | 改画面的 PR（`gates.json` visual.paths）过审核与 CI 后不合并：发 Access 保护的预览 `pr-<编号>.<子域>` → 评分 → 达标加 `awaiting-acceptance`，用户加 `accepted`（只认仓库所有者、晚于最新提交）才合并；未达标交 Claude 修，最多 3 轮。正式站一键回滚到上一次成功发布 |
+| 发布把关 | `accept.yml`、`scripts/devloop/accept.mjs`、`pages.sh` 的 `PREVIEW_BRANCH`、`rollback.yml` + `rollback.sh` | 改画面的 PR（`gates.json` visual.paths）过审核与 CI 后不合并：发 Access 保护的预览 `pr-<编号>.<子域>` → 评分 → 达标加 `awaiting-acceptance`，用户加 `accepted`（只认仓库所有者、晚于针对当前 head 的等待标记；之后 main 又改了画面就失效）才合并；未达标交 Claude 修，最多 3 轮。正式站一键回滚到上一次成功发布 |
 | 合并排期 | `cloud.mjs select` + `accept.mjs queueBlocker` | 与更早、在途的 PR 改同一文件就排队；前面的 PR 在等人（needs-user / hold / 等视觉验收）时不挡队 |
 | 真机试玩 | `.github/ISSUE_TEMPLATE/playtest.md` | 用户每个里程碑在自己手机上玩一次；设备模拟截图不是真机，云真机服务要付费，问用户 |
 
@@ -131,6 +133,20 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 4. 标签由 `accept.yml` 自动创建（`awaiting-acceptance`、`accepted`）。
 5. 这些改动都在 `.github/workflows/`，云端审核合不了，由本机审核方或用户合并。
 6. 残余风险如实告诉用户：截图由 PR 代码渲染，PR 可以画出好看的截图或在图里写字诱导评分——模型评分只是初筛，最后由用户看预览；SwiftShader 下的帧时间与真机无关，不判定。
+
+## 二·十、可选：GPT 执行者（主设）与派活通道
+
+适用：用户比稿后选 GPT 做某类工作（例如视觉 / 造型 / 设计）的主实现者，或想让两家模型都能接活。需要 `OPENAI_API_KEY` 与云端审核（二·六）。
+
+| 文件 | 做什么 |
+|---|---|
+| `.github/workflows/codex.yml` | issue 打 `gpt-design`（人打的标签才触发）或 `gh workflow run codex.yml -f issue=N` → openai/codex-action 以 `:workspace` 权限（无网络，依赖先装好；issue / PR 全文先取成文件）改工作区 → 工作流（不经模型）提交、跑 `npm test && npm run build` 把关、打 bundle → publish 推 `codex/issue-N` 开 PR；`-f pr=N` 按审核意见修复 `codex/*` PR |
+| `scripts/devloop/codex-result.json` | Codex 的结构化输出（outcome / title / body） |
+| `ctx.sh`、`publish.sh` 的 `PREFIX` / `LABEL` | 执行者只动自己前缀的分支：Claude 不修 `codex/*`，GPT 不修 `claude/*` |
+| `review-format.mjs prAuthor` + `gpt-review.yml` | **谁写的谁不审**：本仓库 `codex/*` 分支的 PR 跳过 GPT 审核方，只由 Claude 审（`combine-review.mjs solo`，即使 `SECOND_REVIEW=off` 也审）；需修改交回作者（`codex.yml`） |
+| `executors.test.mjs` | 上面这些分工的测试 |
+
+会话里临时请 Codex 云端动手：以用户账号在 issue / PR 下评论 `@codex …`（需用户装好 Codex GitHub 集成），它开的 `codex/*` PR 同样进入上面的审核与修复。改 `.github/workflows/` 的 GPT 改动不发布（令牌推不上去），转 `needs-user`。
 
 ## 三、设计要点（每一条都是真实审核里被打回过的）
 
@@ -185,6 +201,19 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 - 同一对象的请求会排队的工作流（如点名 AI 回复），`concurrency` 也要加 `queue: max`，否则后来的请求会挤掉尚未处理的那个；而且要放在**工作流级**（串行整次运行，含发评论任务），后到的运行才能看到前一次的结果做去重。
 - **带标签新建 issue 会同时产生 `opened` 和每个标签的 `labeled` 事件**：“打上某标签就让 AI 发言”只处理 `labeled`，并在发言前检查是否已有该 AI 的评论，否则一次创建会付费发言两三次。
 - 点名类 AI 回复要把**触发的那条评论（id、正文、链接）**单独交给模型并要求只回答它；全文截断时不截这条。否则两条点名先后排队，都会去回答最新那条，前一条漏答。
+
+## 三·六、试点经验（camp-empire M1，车辆造型）
+
+- **不转告**：曾经用用户的 Chrome 给 Codex 网页派任务、再去网页取结果——用户明确叫停。派活和交付只走 GitHub（见开头铁律、二·十）。
+- **不自审**：写代码的模型不当自己的视觉评分方、不审自己的代码。评分方 / 审核方按作者切换，默认另一家。
+- **选主设靠一次性匿名比稿**：同一需求两家各实现一版，同机位出图，匿名 A/B 给用户打分。比稿是一次性的决策，不写进默认流程；选定后写成仓库变量 / 标签分工。
+- **视觉评分先做多模态自检**：模型名不代表能看图；四色方块答错就不评，结果一律不放行。
+- **截图要送到人看的地方**：埋在 Actions 产物里的截图没人看。验收评论里直接给预览地址与截图链接，会话里把图贴给用户。
+- **模型验收抓得到测试抓不到的“结构荒谬”**：悬空的方向盘、没有仪表台、车窗跑到 A 柱外面——单测、包围盒、draw call 全过。视觉评分提示词与 GPT 主设提示词都要求“交代支撑、连接、遮挡关系”。
+- **失败必须 @ 人**：只加 `needs-user` 标签不会通知任何人；网关账号被停用（HTTP 403）一天多没人发现。所有停下等人的评论都 @ 仓库所有者（`notifyLine`，`DEVLOOP_NOTIFY` 可改）。
+- **固定 runner 镜像**：`ubuntu-latest` 升到 26.04 后 codex-action 的 drop-sudo 失败（runner 不在 sudo 组）。跑 codex-action 的任务固定 `ubuntu-24.04`。
+- **发布把关绑定“被预览的组合”**：确认绑定当前 head 的等待标记与当时的 main；不作数的 `accepted`（过期、非所有者）一律摘掉，否则每轮重来。所有合并入口（云端、本机）共用同一个前置条件 `acceptanceGate`。
+- **同文件 PR 排队**：两个 PR 改同一文件时后者等前者合完，免得互相冲突返工；等人的 PR 不挡队。
 
 ## 三·五、本机与云端审核方并存：冲突与去重
 

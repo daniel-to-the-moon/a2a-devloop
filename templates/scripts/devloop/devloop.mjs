@@ -24,7 +24,7 @@ import { decide, eligible, hasTerminal, lastFindings, limitMode, roundsUsed, sho
 import { createPrState } from './prstate.mjs';
 import { acceptanceGate, compareFiles, followUpsAccept, isAwaiting, loadGates, ownerAcceptance } from './accept.mjs';
 import { drainPending, followUpItems } from './followups.mjs';
-import { buildReviewPrompt, formatReview, notifyLine, touchesWorkflows, validateReview } from './review-format.mjs';
+import { buildReviewPrompt, formatReview, notifyLine, prAuthor, touchesWorkflows, validateReview } from './review-format.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_DIR = resolve(HERE, '../..');
@@ -279,6 +279,8 @@ async function watch(intervalSec) {
       for (const { number } of prs.sort((a, b) => a.number - b.number)) {
         const m = prState(number);
         if (!shouldReview({ head: m.headRefOid, labels: m.labels, markers: m.markers, pr: m })) continue;
+        // GPT 写的 PR（codex/* 分支）不让 GPT 审：本机审核方只有 Codex CLI（GPT），交给云端由 Claude 审
+        if (prAuthor(m) === 'gpt') continue;
         // 当前 head 正在等用户视觉验收：不再审（省审核费用），用户加 accepted 或推新提交后再处理
         const gates = loadGates();
         if (gates && isAwaiting(m, gates.visual)) continue;

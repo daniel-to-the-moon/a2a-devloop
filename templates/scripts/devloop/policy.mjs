@@ -30,7 +30,8 @@ export function limitMode(v) {
 }
 export const SKIP_LABELS = ['needs-user', 'hold'];
 const TERMINAL = new Set(['changes', 'merged', 'stopped']);
-const REVIEW_PREFIX = '执行者：GPT';
+// 审核评论前缀：GPT 审核（作者是 Claude）；作者是 GPT 的 PR 改由 Claude 独立审核（不让 GPT 审自己写的代码）
+const REVIEW_PREFIXES = ['执行者：GPT', '执行者：Claude 审核（'];
 
 function sign(key, pr, state, head, base) {
   return createHmac('sha256', key).update(`${pr}|${state}|${head}|${base}`).digest('hex').slice(0, 32);
@@ -48,7 +49,7 @@ export function marker(key, { pr, state, head, base, reason = 'none' }) {
 export function parseMarkers(comments, { key, reviewer, pr }) {
   const out = [];
   for (const c of comments) {
-    if (![].concat(reviewer).includes(c.author) || !c.body.startsWith(REVIEW_PREFIX)) continue;
+    if (![].concat(reviewer).includes(c.author) || !REVIEW_PREFIXES.some((x) => c.body.startsWith(x))) continue;
     const all = [...c.body.matchAll(/<!-- devloop pr=(\d+) state=(\w+:\w+) head=([0-9a-f]{40}) base=([0-9a-f]{40}) sig=([0-9a-f]{32}) -->/g)];
     const m = all.at(-1);
     if (!m || Number(m[1]) !== pr) continue;

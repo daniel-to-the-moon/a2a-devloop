@@ -45,6 +45,8 @@ jobs:
       pr: ${{ steps.pick.outputs.pr }}
       head: ${{ steps.pick.outputs.head }}
       base: ${{ steps.pick.outputs.base }}
+      # PR 作者：gpt（本仓库 codex/* 分支）→ 只由 Claude 审；claude → GPT 审 + Claude 复核
+      author: ${{ steps.pick.outputs.author }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,7 +110,9 @@ jobs:
           REPO: ${{ github.repository }}
           DEVLOOP_MARKER_KEY: ${{ secrets.DEVLOOP_MARKER_KEY }}
         run: node _main/scripts/devloop/cloud.mjs prompt --pr "${{ needs.select.outputs.pr }}" --head "${{ needs.select.outputs.head }}" --base "${{ needs.select.outputs.base }}" --dir pr --out "$RUNNER_TEMP/prompt.md"
+      # 作者是 GPT 的 PR 不让 GPT 审（谁写的谁不审），只由下面的 Claude 审
       - name: GPT 审核
+        if: needs.select.outputs.author != 'gpt'
         uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13（标签指向的提交）
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -129,10 +133,10 @@ jobs:
       # 工具与设置来源的约束由 scripts/devloop/combine-review.test.mjs 读取本文件校验。
       # 结论缺失或不合法时本任务失败，decide 按“审核未完成”处理（计入同一提交 3 次上限），不会只凭 GPT 一方放行。
       - name: 安装 Claude Code（固定版本）
-        if: vars.SECOND_REVIEW != 'off'
+        if: vars.SECOND_REVIEW != 'off' || needs.select.outputs.author == 'gpt'
         run: npm install -g --no-audit --no-fund @anthropic-ai/claude-code@2.1.318
       - name: Claude 审核
-        if: vars.SECOND_REVIEW != 'off'
+        if: vars.SECOND_REVIEW != 'off' || needs.select.outputs.author == 'gpt'
         working-directory: pr
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -140,6 +144,7 @@ jobs:
           # 未设 CLAUDE_REVIEW_MODEL 时沿用执行者的 CLAUDE_MODEL；两个都没设则本步骤失败（按审核未完成处理）
           MODEL: ${{ vars.CLAUDE_REVIEW_MODEL || vars.CLAUDE_MODEL }}
           BASE_SHA: ${{ needs.select.outputs.base }}
+          AUTHOR: ${{ needs.select.outputs.author }}
         run: |
           set -euo pipefail
           [ -n "$ANTHROPIC_BASE_URL" ] || unset ANTHROPIC_BASE_URL
@@ -149,7 +154,7 @@ jobs:
           git diff --stat "$BASE_SHA...HEAD" > "$CTX/stat.txt"
           git diff "$BASE_SHA...HEAD" > "$CTX/diff.patch"
           git log --no-color "$BASE_SHA..HEAD" > "$CTX/log.txt"
-          node ../_main/scripts/devloop/combine-review.mjs prompt --in "$RUNNER_TEMP/prompt.md" --ctx "$CTX" --out "$RUNNER_TEMP/claude-prompt.md"
+          node ../_main/scripts/devloop/combine-review.mjs prompt --in "$RUNNER_TEMP/prompt.md" --ctx "$CTX" --author "${AUTHOR:-claude}" --out "$RUNNER_TEMP/claude-prompt.md"
           claude -p "$(cat "$RUNNER_TEMP/claude-prompt.md")" \
             --model "$MODEL" \
             --max-turns 80 \
@@ -162,11 +167,14 @@ jobs:
             --strict-mcp-config \
             < /dev/null > "$RUNNER_TEMP/claude-result.json"
       - name: 合并两方结论
-        if: vars.SECOND_REVIEW != 'off'
+        if: vars.SECOND_REVIEW != 'off' && needs.select.outputs.author != 'gpt'
         run: |
           set -euo pipefail
           node _main/scripts/devloop/combine-review.mjs merge --gpt "$RUNNER_TEMP/review.json" --claude "$RUNNER_TEMP/claude-result.json" --out "$RUNNER_TEMP/combined.json"
           mv "$RUNNER_TEMP/combined.json" "$RUNNER_TEMP/review.json"
+      - name: Claude 结论作为唯一结论（作者是 GPT）
+        if: needs.select.outputs.author == 'gpt'
+        run: node _main/scripts/devloop/combine-review.mjs solo --claude "$RUNNER_TEMP/claude-result.json" --out "$RUNNER_TEMP/review.json"
       - name: 封装结论与元数据（工作流写入，不经模型）
         id: wrap
         env:
@@ -218,6 +226,7 @@ jobs:
           REPO: ${{ github.repository }}
           DEVLOOP_MARKER_KEY: ${{ secrets.DEVLOOP_MARKER_KEY }}
           GPT_MODEL: ${{ vars.GPT_MODEL }}
+          CLAUDE_REVIEW_MODEL: ${{ vars.CLAUDE_REVIEW_MODEL || 'claude-opus-5-5' }}
           REVIEW_RESULT: ${{ needs.review.result }}
           # 轮次用满后的处理（用户自选）：needs-user（默认，停下等用户）| auto（收敛则追加轮次，否则无 blocker 即合并并把遗留意见转 issue）
           ROUND_LIMIT_MODE: ${{ vars.ROUND_LIMIT_MODE }}

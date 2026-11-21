@@ -1,0 +1,232 @@
+# devloop 云端执行者：GPT（主设，openai/codex-action；可选模块，需要 OPENAI_API_KEY）。见 docs/DEVLOOP.md “执行者与派活通道”。
+# - issue 打上 gpt-design 标签（人打的标签才会触发）→ GPT 实现，开 codex/issue-N 分支的 PR
+# - 手动触发 / 云端审核 workflow_dispatch：issue=N 实现；pr=N 按最新审核意见修复 codex/* 分支上的 PR
+# GPT 写的 PR 由 Claude 独立审核（gpt-review.yml：作者是 GPT 时不跑 GPT 审核方），需修改时交回本工作流修。
+#
+# Agent 之间只通过 GitHub 协作：issue、PR、评论、标签、workflow_dispatch。不经浏览器 / 桌面客户端转告。
+#
+# 安全结构与 claude.yml 相同：
+#   work    ：只读令牌。依赖先装好（Codex 的 :workspace 权限不给网络），Codex 只改工作区；随后由工作流（不经模型）
+#             提交、跑测试把关、打成 git bundle 上传。托管 runner 用完即弃，drop-sudo 之后的步骤不需要 sudo。
+#   publish ：有写权限，但不检出、不执行仓库代码；只把 bundle 推到 codex/* 分支并开 PR 或评论（publish.sh，PREFIX=codex）。
+name: codex
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: '要修复的 PR 编号（codex/* 分支，按最新审核意见修复）'
+        required: false
+      issue:
+        description: '要实现的 issue 编号（需带 gpt-design 标签；与 pr 二选一）'
+        required: false
+
+permissions: {}
+
+jobs:
+  work:
+    if: >-
+      (github.event_name == 'issues' &&
+       github.event.label.name == 'gpt-design' &&
+       !contains(github.event.issue.labels.*.name, 'needs-user')) ||
+      github.event_name == 'workflow_dispatch'
+    # 固定镜像：codex-action 的 drop-sudo 在 ubuntu-26.04（ubuntu-latest）上失败
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    concurrency:
+      group: codex-${{ github.event.issue.number || inputs.pr || inputs.issue }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+    outputs:
+      mode: ${{ steps.ctx.outputs.mode }}
+      branch: ${{ steps.ctx.outputs.branch }}
+      start: ${{ steps.start.outputs.start }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: _devloop
+          sparse-checkout: scripts/devloop
+          persist-credentials: false
+      - name: 确定模式与分支
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          KIND: ${{ (github.event_name == 'issues' || inputs.issue) && 'issue' || '' }}
+          BOTH: ${{ inputs.issue && inputs.pr && 'yes' || '' }}
+          PREFIX: codex
+          LABEL: gpt-design
+        run: |
+          [ -z "$BOTH" ] || { echo "::error::pr 与 issue 只能填一个" >&2; exit 1; }
+          bash _devloop/scripts/devloop/ctx.sh
+      # 下一步检出到根目录会清空 _devloop：先把 main 上的可信文件复制出来
+      - name: 保存 main 上的结果格式
+        run: |
+          mkdir -p "$RUNNER_TEMP/devloop" "$RUNNER_TEMP/codex-ctx"
+          cp _devloop/scripts/devloop/codex-result.json "$RUNNER_TEMP/codex-result.schema.json"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ctx.outputs.mode == 'fix' && steps.ctx.outputs.branch || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 记录起点
+        id: start
+        run: |
+          echo "start=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git config user.name "codex-devloop[bot]"
+          git config user.email "codex-devloop@users.noreply.github.com"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Codex 的 :workspace 权限没有网络：依赖在这里装好
+      - name: 安装依赖
+        run: if [ -f package.json ]; then npm ci --no-audit --no-fund; fi
+      # Codex 没有网络、也没有 GitHub 令牌：issue / PR 全文与审核意见在这里取好，写成只读文件
+      - name: 取任务上下文
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
+          MODE: ${{ steps.ctx.outputs.mode }}
+        run: |
+          set -euo pipefail
+          C="$RUNNER_TEMP/codex-ctx"
+          if [ "$MODE" = "fix" ]; then
+            gh pr view "$N" -R "$REPO" > "$C/task.md"
+            gh pr view "$N" -R "$REPO" --comments > "$C/comments.md"
+          else
+            gh issue view "$N" -R "$REPO" --comments > "$C/task.md"
+          fi
+      - name: 写提示词
+        env:
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
+          MODE: ${{ steps.ctx.outputs.mode }}
+        run: |
+          set -euo pipefail
+          C="$RUNNER_TEMP/codex-ctx"
+          {
+            echo "你是本仓库的主设计与实现者 GPT（devloop 循环，见 docs/DEVLOOP.md）。另一位执行者是 Claude；你写的代码由 Claude 独立审核，你不审自己的代码。"
+            echo "你没有网络、没有 GitHub 令牌：不要尝试推送、开 PR、评论或安装依赖（依赖已装好）。只在工作区改文件，不要 git commit，提交与发布由后续步骤完成。"
+            echo ""
+            echo "模式：$MODE；编号：#$N。任务全文：$C/task.md$([ "$MODE" = fix ] && echo "；PR 评论（以最新一条带 state=changes 的审核评论或“未达标”的视觉验收评论为准）：$C/comments.md")"
+            echo ""
+            echo "要求："
+            echo "- 先读 docs/DEVLOOP.md 与项目章程、规范文件（如存在）。遵守 项目章程里的硬边界；新增数值注明“提案 / 待核实”或给出推演。"
+            echo "- 画面相关：风格目标见 docs/visual/STYLE.md，draw call 预算见 scripts/e2e/budgets.json。造型要交代结构（支撑、连接、遮挡关系），不要出现悬空或穿模的部件。"
+            echo "- 为新增或改动的逻辑写测试；结束前运行 npm test 与 npm run build，必须通过（后续步骤会再跑一次，不通过不会发布）。"
+            echo "- 不要改 .github/workflows/ 下的文件（发布令牌推不上去）。"
+            echo "- fix 模式：逐条处理 blocker 与 major；不同意的写明依据。"
+            echo "- 信息不足或命中 docs/DEVLOOP.md 第五节停止条件：不改代码，outcome 写 needs-user，body 写原因。"
+            echo ""
+            echo "最后只输出符合给定 JSON Schema 的结果：outcome（pr | needs-user）、title（PR 标题，implement 时用）、body（PR 描述或评论正文：改了什么、怎么验证、哪些是提案值；implement 模式末尾写 Closes #$N）。"
+          } > "$RUNNER_TEMP/prompt.md"
+      - name: GPT 实现
+        id: codex
+        continue-on-error: true
+        timeout-minutes: 75
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13（标签指向的提交）
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ vars.GPT_RESPONSES_ENDPOINT }}
+          model: ${{ vars.GPT_DESIGN_MODEL || vars.GPT_MODEL }}
+          effort: high
+          permission-profile: ':workspace'
+          prompt-file: ${{ runner.temp }}/prompt.md
+          output-schema-file: ${{ runner.temp }}/codex-result.schema.json
+          output-file: ${{ runner.temp }}/codex-result.json
+      # 以下不经模型：按结果提交、跑测试把关、打包。任何一步不满足都转 needs-user（publish 会 @ 负责人）
+      - name: 提交并把关
+        if: always() && steps.ctx.outcome == 'success'
+        env:
+          OUT: ${{ runner.temp }}/devloop
+          START: ${{ steps.start.outputs.start }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CODEX_OUTCOME: ${{ steps.codex.outcome }}
+          RESULT: ${{ runner.temp }}/codex-result.json
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
+        run: |
+          set -uo pipefail
+          WHO='执行者：GPT（devloop 主设，codex.yml）'
+          stop() { printf '%s\n\n%s\n\n运行记录：%s\n' "$WHO" "$1" "$RUN_URL" > "$OUT/body.md"; echo needs-user > "$OUT/outcome"; exit 0; }
+          [ "$CODEX_OUTCOME" = "success" ] || stop "GPT 这一步没有正常完成（结果：${CODEX_OUTCOME:-未运行}），自动循环在此停下。"
+          jq -e '.outcome and .body' "$RESULT" >/dev/null 2>&1 || stop "GPT 没有给出合法的结果。"
+          printf '%s\n\n%s\n' "$WHO" "$(jq -r .body "$RESULT")" > "$OUT/body.md"
+          jq -r '.title // ""' "$RESULT" | head -c 120 > "$OUT/title.txt"
+          if [ "$(jq -r .outcome "$RESULT")" != "pr" ]; then echo needs-user > "$OUT/outcome"; exit 0; fi
+          git add -A
+          git diff --cached --quiet && stop "GPT 说已完成，但工作区没有任何改动。"
+          git diff --cached --name-only | grep -q '^\.github/workflows/' && stop "改动包含 .github/workflows/（发布令牌推不上去），请用户处理。"
+          git commit -q -m "$(jq -r '.title // "GPT 实现"' "$RESULT" | head -c 120)" -m "devloop：GPT（codex.yml）#$N"
+          if [ -f package.json ]; then
+            if ! (npm test && npm run build) > "$RUNNER_TEMP/gate.log" 2>&1; then
+              stop "$(printf 'GPT 的改动没有通过 npm test / npm run build，未发布。日志末尾：\n\n```\n%s\n```' "$(tail -n 40 "$RUNNER_TEMP/gate.log")")"
+            fi
+          fi
+          git bundle create "$OUT/work.bundle" "$START..HEAD" HEAD
+          echo pr > "$OUT/outcome"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: devloop-${{ github.run_id }}
+          path: ${{ runner.temp }}/devloop
+          retention-days: 7
+
+  publish:
+    needs: work
+    if: always() && needs.work.result != 'skipped' && needs.work.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: devloop-${{ github.run_id }}
+          path: out
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: _devloop
+          sparse-checkout: scripts/devloop
+          persist-credentials: false
+      - name: 推送分支并开 PR 或评论
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
+          MODE: ${{ needs.work.outputs.mode }}
+          BRANCH: ${{ needs.work.outputs.branch }}
+          START: ${{ needs.work.outputs.start }}
+          EVENT: ${{ github.event_name }}
+          OUT: ${{ github.workspace }}/out
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PREFIX: codex
+          WHO: GPT（devloop 主设，codex.yml）
+        run: |
+          export PUSH_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          bash _devloop/scripts/devloop/publish.sh
+      - name: 发布失败时报告
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
+          BRANCH: ${{ needs.work.outputs.branch }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf '执行者：GPT（devloop 主设，codex.yml）\n\n发布步骤失败（分支：%s）。自动循环在此停下，请用户查看：%s\n' "${BRANCH:-未知}" "$RUN_URL" > report.md
+          printf '\n@%s 自动循环已停下，需要你处理。\n' "$GITHUB_REPOSITORY_OWNER" >> report.md
+          gh issue comment "$N" -R "$REPO" --body-file report.md || true
+          gh issue edit "$N" -R "$REPO" --add-label needs-user || true

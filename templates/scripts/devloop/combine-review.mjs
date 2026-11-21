@@ -11,6 +11,7 @@
  * 用法：
  *   node combine-review.mjs prompt --in prompt.md --ctx <预生成 diff 的目录> --out claude-prompt.md
  *   node combine-review.mjs merge --gpt review.json --claude claude-result.json --out combined.json
+ *   node combine-review.mjs solo --claude claude-result.json --out review.json   （作者是 GPT 的 PR：Claude 是唯一审核方）
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { validateReview } from './review-format.mjs';
@@ -20,7 +21,7 @@ import { validateReview } from './review-format.mjs';
  * Claude 没有 Bash（前缀白名单挡不住 `git log --output` 写文件），
  * 所以“用 git diff 查看”那一行换成工作流预先生成的只读文件路径。
  */
-export function claudePrompt(gptPrompt, ctxDir) {
+export function claudePrompt(gptPrompt, ctxDir, { author = 'claude' } = {}) {
   if (!ctxDir) throw new Error('缺少预生成 diff 的目录');
   const lines = gptPrompt.split('\n');
   const first = lines[0] ?? '';
@@ -29,13 +30,16 @@ export function claudePrompt(gptPrompt, ctxDir) {
   const i = lines.findIndex((l) => l.startsWith('用 `git diff '));
   if (i < 0) throw new Error('审核提示词里找不到“用 `git diff …` 查看完整改动”这一行');
   lines[i] = `完整改动已预先生成：\`${ctxDir}/diff.patch\`（统计 \`${ctxDir}/stat.txt\`，提交记录 \`${ctxDir}/log.txt\`），用 Read / Grep 阅读；当前工作目录是 PR 头部提交的检出。测试与构建由 CI 在合并后的代码上另行执行，你只需审代码。`;
+  if (author === 'gpt') lines[0] = lines[0].replace('第二审核方 Claude（只读评审会话）', '审核方 Claude（只读评审会话；本 PR 由 GPT 编写，GPT 不审自己的代码，你是唯一的代码审核方）');
   return [
     lines.join('\n'),
     '',
-    '## 第二审核方补充说明',
+    author === 'gpt' ? '## 审核方补充说明' : '## 第二审核方补充说明',
     '',
-    '- 你与第一审核方 GPT 并行、互不可见，结论会合并：任一方 request_changes 就不会合并。',
-    '- 代码执行者也是 Claude，但是另一个会话；你与它独立，不要因为同属一家模型就放松标准。',
+    ...(author === 'gpt'
+      ? ['- 本 PR 的代码作者是 GPT（Codex）。你是唯一的代码审核方：你 approve 且 CI 通过就会合并，按最严标准审。']
+      : ['- 你与第一审核方 GPT 并行、互不可见，结论会合并：任一方 request_changes 就不会合并。',
+        '- 代码执行者也是 Claude，但是另一个会话；你与它独立，不要因为同属一家模型就放松标准。']),
     '- 你只有 Read / Glob / Grep 三个工具，不能运行命令；不要尝试修改任何文件。',
     '- 额外核对“验收”：PR 描述与关联 issue 里的验收标准是否逐条有代码与测试对应；缺了就列为 major。',
     '- 只输出符合给定 JSON Schema 的结论。',
@@ -65,6 +69,17 @@ export function extractClaude(raw) {
   return review;
 }
 
+/** 作者是 GPT 的 PR：只有 Claude 一方的结论（意见同样标 [Claude]，格式与合并结果一致） */
+export function soloClaude(claude) {
+  const bad = validateReview(claude);
+  if (bad) throw new Error(`Claude 结论不合法：${bad}`);
+  return {
+    verdict: claude.verdict,
+    summary: `Claude（${claude.verdict === 'approve' ? '通过' : '需修改'}；作者是 GPT，GPT 不参与审核）：${claude.summary}`,
+    findings: claude.findings.map((f) => ({ ...f, issue: `[Claude] ${f.issue}` })),
+  };
+}
+
 export function combineReviews(gpt, claude) {
   for (const [who, r] of [['GPT', gpt], ['Claude', claude]]) {
     const bad = validateReview(r);
@@ -89,7 +104,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   try {
     const cmd = process.argv[2];
     if (cmd === 'prompt') {
-      writeFileSync(arg('out'), claudePrompt(readFileSync(arg('in'), 'utf8'), arg('ctx')));
+      const ai = process.argv.indexOf('--author');
+      writeFileSync(arg('out'), claudePrompt(readFileSync(arg('in'), 'utf8'), arg('ctx'), { author: ai > 0 ? process.argv[ai + 1] : 'claude' }));
+    } else if (cmd === 'solo') {
+      const review = soloClaude(extractClaude(readFileSync(arg('claude'), 'utf8')));
+      writeFileSync(arg('out'), JSON.stringify(review, null, 2));
+      console.log(`Claude（唯一审核方）：${review.verdict}（意见 ${review.findings.length} 条）`);
     } else if (cmd === 'merge') {
       const gpt = JSON.parse(readFileSync(arg('gpt'), 'utf8'));
       const claude = extractClaude(readFileSync(arg('claude'), 'utf8'));

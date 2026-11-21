@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "title", "body"],
+  "properties": {
+    "outcome": { "type": "string", "enum": ["pr", "needs-user"] },
+    "title": { "type": "string", "maxLength": 120 },
+    "body": { "type": "string", "maxLength": 20000 }
+  }
+}
