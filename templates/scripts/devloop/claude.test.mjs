@@ -307,8 +307,88 @@ test('claude.yml：action 之前运行 install-bun.sh，并把它输出的路径
   assert.match(yml, /path_to_bun_executable: \$\{\{ steps\.bun\.outputs\.path \}\}/);
 });
 
-test('claude.yml：只在手动触发（云端审核用 GITHUB_TOKEN 发起）时放行 github-actions 机器人', () => {
+/**
+ * 读取 claude.yml 里 work 任务的真实 `if:`（多行 `>-`），用一个小型 GitHub 表达式求值器计算。
+ * 支持：&& || ! 括号、== !=、'字符串'、属性路径（含 `.*.name` 过滤）、contains()、startsWith()。
+ * 不认识的语法直接抛错，测试失败而不是默默算错。
+ */
+function workRuns(ctx) {
   const yml = readFileSync(join(HERE, '../../.github/workflows/claude.yml'), 'utf8');
-  assert.match(yml, /\n {10}allowed_bots: \$\{\{ github\.event_name == 'workflow_dispatch' && 'github-actions' \|\| '' \}\}\n/);
-  assert.doesNotMatch(yml, /allowed_bots: ['"]?\*/);
+  const job = yml.match(/^  work:\n((?:(?: {4,}.*)?\n)*)/m);
+  assert.ok(job, 'claude.yml 里找不到 work 任务');
+  const m = job[1].match(/^ {4}if: >-\n((?: {6,}.*\n)+)/m);
+  assert.ok(m, 'work 的 if 应为 >- 多行表达式');
+  const src = m[1].split('\n').map((l) => l.trim()).join(' ');
+  const tokens = src.match(/'[^']*'|&&|\|\||==|!=|!|\(|\)|,|[A-Za-z_][\w.*-]*/g);
+  assert.equal(tokens.join('').replace(/\s/g, ''), src.replace(/\s/g, ''), '表达式里有不认识的字符');
+  let i = 0;
+  const peek = () => tokens[i];
+  const next = () => tokens[i++];
+  const lookup = (path) => {
+    let cur = [ctx];
+    for (const part of path.split('.')) {
+      if (part === '*') { cur = cur.flatMap((v) => (Array.isArray(v) ? v : [])); continue; }
+      cur = cur.map((v) => (v == null ? null : v[part]));
+    }
+    return path.includes('*') ? cur.filter((v) => v != null) : cur[0] ?? null;
+  };
+  const eq = (a, b) => String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
+  function primary() {
+    const t = next();
+    if (t === '(') { const v = or(); assert.equal(next(), ')'); return v; }
+    if (t === '!') return !primary();
+    if (t.startsWith("'")) return t.slice(1, -1);
+    if (t === 'contains' || t === 'startsWith') {
+      assert.equal(next(), '(');
+      const a = or(); assert.equal(next(), ',');
+      const b = or(); assert.equal(next(), ')');
+      if (t === 'startsWith') return String(a ?? '').startsWith(String(b));
+      return Array.isArray(a) ? a.some((x) => eq(x, b)) : String(a ?? '').includes(String(b));
+    }
+    if (/^[A-Za-z_]/.test(t)) return lookup(t);
+    throw new Error(`不支持的记号：${t}`);
+  }
+  function cmp() {
+    let v = primary();
+    while (peek() === '==' || peek() === '!=') { const op = next(); const r = primary(); v = op === '==' ? eq(v, r) : !eq(v, r); }
+    return v;
+  }
+  function and() { let v = cmp(); while (peek() === '&&') { next(); const r = cmp(); v = Boolean(v) && Boolean(r); } return v; }
+  function or() { let v = and(); while (peek() === '||') { next(); const r = and(); v = Boolean(v) || Boolean(r); } return v; }
+  const result = or();
+  assert.equal(i, tokens.length, '表达式未完整解析');
+  return Boolean(result);
+}
+
+const labelled = (vars = {}, labels = []) => ({
+  github: { event_name: 'issues', repository_owner: 'o', event: { label: { name: 'devloop' }, issue: { labels: labels.map((name) => ({ name })) } } },
+  vars,
+});
+const reviewComment = (vars = {}) => ({
+  github: {
+    event_name: 'issue_comment',
+    repository_owner: 'o',
+    event: { issue: { pull_request: { url: 'x' }, labels: [] }, comment: { user: { login: 'o' }, body: '执行者：GPT 审核 <!-- devloop state=changes:f2 sig=x -->' } },
+  },
+  vars,
+});
+
+test('claude.yml：打 devloop 标签触发；DEVLOOP_PAUSED=true 时一切不跑；needs-user 不跑', () => {
+  assert.equal(workRuns(labelled()), true);
+  assert.equal(workRuns(labelled({ DEVLOOP_PAUSED: 'true' })), false);
+  assert.equal(workRuns(labelled({}, ['needs-user'])), false);
+  assert.equal(workRuns({ github: { event_name: 'workflow_dispatch', event: {} }, vars: { DEVLOOP_PAUSED: 'true' } }), false);
+  assert.equal(workRuns({ github: { event_name: 'workflow_dispatch', event: {} }, vars: {} }), true);
+});
+
+test('claude.yml：审核评论默认触发修复；DEVLOOP_REVIEWER=off 或暂停时不触发；普通评论不触发', () => {
+  assert.equal(workRuns(reviewComment()), true);
+  assert.equal(workRuns(reviewComment({ DEVLOOP_REVIEWER: 'off' })), false);
+  assert.equal(workRuns(reviewComment({ DEVLOOP_PAUSED: 'true' })), false);
+  const ordinary = reviewComment();
+  ordinary.github.event.comment.body = '执行者：GPT 看起来不错';
+  assert.equal(workRuns(ordinary), false);
+  const stranger = reviewComment();
+  stranger.github.event.comment.user.login = 'someone-else';
+  assert.equal(workRuns(stranger), false);
 });

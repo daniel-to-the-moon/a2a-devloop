@@ -76,30 +76,16 @@ Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费
 - 需要 secret `OPENAI_API_KEY`；用网关时设变量 `GPT_RESPONSES_ENDPOINT`、`GPT_MODEL`。
 - GPT 只评审与提问，不拍板；用户给 `proposal` 加 `devloop` 即同意实现。
 
-## 云端审核与双评审（可选，仓库变量 `CLOUD_REVIEW=on`）
+## 开关（仓库变量）
 
-- `gpt-review.yml` 每 10 分钟扫描（GitHub 定时可能延后），手动：`gh workflow run gpt-review.yml -f pr=<编号>`（不受开关限制）。
-- 结构：`select`（只读，选一个 PR）→ `review`（只读：GPT 用 codex-action `:read-only` 审；Claude 只给 Read / Glob / Grep 再独立审一遍）→ `decide`（有写权限、不运行模型：触发 CI、判定、合并或退回、评论）。整个工作流全局串行。
-- **合并规则**：GPT 与 Claude **都通过**、CI（合并后的代码 + 浏览器冒烟）通过、main 未变、无暂停标签才合并；任一方需修改即退回，意见标 `[GPT]` / `[Claude]`。Claude 结论缺失或不合法按“审核未完成”处理（计入同一提交 3 次上限），不会只凭一方放行。`SECOND_REVIEW=off` 关闭第二审核方。
-- **后续动作**：`GITHUB_TOKEN` 发的评论不会触发 `claude.yml`，所以需修改时 `decide` 直接 `workflow_dispatch` 修复；`GITHUB_TOKEN` 推 main 不触发 push 工作流，所以合并后 `decide` 触发 `ci.yml -f deploy_main=true` 完成发布。
-- **分工**：云端只审不改 `.github/workflows/` 的 PR；改工作流的 PR 由本机审核方或有权限的本地会话处理。
-- **信任边界**：不设 `pull_request` 入口；定时只用 main 上的定义，手动触发时各任务校验 `github.ref == refs/heads/main`。
-- **凭据**：`OPENAI_API_KEY`（+ 可选 `GPT_RESPONSES_ENDPOINT`、`GPT_MODEL`）、`ANTHROPIC_API_KEY`（+ 可选 `ANTHROPIC_BASE_URL`、`CLAUDE_REVIEW_MODEL`，未设沿用 `CLAUDE_MODEL`）、`DEVLOOP_MARKER_KEY`（与本机审核方同一把，两边审核记录互认）。
-- **启动失败会自动重试**：审核任务本身失败（例如 runner 环境问题导致 codex-action 起不来）记为基础设施问题，下一轮扫描重试同一提交；同一提交累计 3 次才停下加 `needs-user`。
+| 变量 | 作用 |
+|---|---|
+| `DEVLOOP_PAUSED=true` | 全部暂停：云端 Claude 不接新活，本机 watch 不审核不合并（查询失败也按暂停处理）。恢复：删掉变量或改成别的值 |
+| `DEVLOOP_REVIEWER=off` | 云端不响应审核评论（只用执行者、审核方未接入时）；修复改用手动 `gh workflow run claude.yml -f pr=<N>` |
+| `ROUND_LIMIT_MODE` | 见第五节 |
+| `CLAUDE_MODEL` / `ANTHROPIC_BASE_URL` | 模型 / 网关 |
 
-## 浏览器冒烟验收（可选）
-
-把 `scripts/e2e/smoke.example.mjs` 按产品核心路径改好、改名为 `scripts/e2e/smoke.mjs`，`ci.yml` 就会在构建后用 Playwright 打开构建产物跑一遍；失败即 CI 失败（不合并、不发布），截图作为 Actions 产物保留 7 天。项目需把 `playwright` 加进 devDependencies；预览命令可用仓库变量 `E2E_PREVIEW_CMD` 覆盖（须监听 `127.0.0.1:4173`）。
-
-## 发布与上线（可选）
-
-见 `docs/LAUNCH.md`：内部预览由 Cloudflare Access 保护、正式地址由用户用 `PAGES_PUBLIC=true` 决定何时公开；匿名统计见 `docs/ANALYTICS.md`。开关都是仓库变量，**改值、不删变量**。
-
-## 费用口径
-
-- **AI 网关费用单独计算**：云端 Claude 开发、GPT / Claude 审核、GPT 讨论都走模型 API（或网关），按用量计费，和项目的现金预算分开记账、分开设上限（在模型控制台 / 网关给 key 设用量上限）。
-- **现金预算**只算托管、域名、第三方服务等；按月还是总额、上限多少由用户定，写进项目文档。
-- GitHub Actions：私有仓库有每月免费分钟数，超出另计；双评审每个提交多一次 Claude 审核用量。单次花费没有实测前写“待核实”。
+凭据二选一：`CLAUDE_CODE_OAUTH_TOKEN`（订阅令牌，本机 `claude setup-token`）或 `ANTHROPIC_API_KEY`；两者都设时按 API key 计费。订阅令牌与日常使用共用额度。
 
 ## 六、恢复
 
@@ -111,5 +97,4 @@ Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费
 - `work` 任务里有模型 API key 并执行仓库代码，依赖投毒可能泄露该 key（拿不到写仓库令牌）→ 给 key 设用量上限。
 - 推送前最后核对与推送之间有很短的窗口；由 GitHub 强制需分支保护（私有仓库需付费套餐）。
 - 审核方本机关机 / 睡眠时不审核、不合并。
-- 云端审核：有仓库写权限、且能推送 `.github/workflows/` 改动的账号，可以推一个改过 YAML 的分支再对它手动触发，从而读到仓库级 secret；真正隔离需把签名密钥移进只允许 main 部署的 environment（私有仓库可能需付费套餐），由用户决定。
-- 合并即发布：自动合并后会自动发布到预览（公开模式下也包括正式地址）；只适合能快速回滚的产品。
+- 用订阅令牌时，额度用完会导致云端秒退并加 needs-user；等额度重置后重跑。

@@ -29,6 +29,15 @@ export function limitMode(v) {
   return LIMIT_MODES.includes(v) ? v : 'needs-user';
 }
 export const SKIP_LABELS = ['needs-user', 'hold'];
+
+/**
+ * 全局暂停开关：仓库变量 DEVLOOP_PAUSED。值为 true 即暂停。
+ * 查询结果 { value } 或 { error }：变量不存在（not found / 404）= 未暂停；其他查询错误按“暂停”处理（急停开关失效时宁可停）。
+ */
+export function isPaused(result) {
+  if (result && typeof result.error === 'string') return !/not found|404/i.test(result.error);
+  return String(result?.value ?? '').trim().toLowerCase() === 'true';
+}
 const TERMINAL = new Set(['changes', 'merged', 'stopped']);
 const REVIEW_PREFIX = '执行者：GPT';
 
