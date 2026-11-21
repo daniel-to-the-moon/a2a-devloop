@@ -1,7 +1,7 @@
 // 云端审核 cloud.mjs：选择逻辑、后续动作、select 子命令（假 gh）以及 gpt-review.yml 的权限结构
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -12,6 +12,9 @@ import { decide, MAX_CI_RETRIES, roundsUsed } from './policy.mjs';
 import { marker } from './policy.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
+
+/** 可选模块的文件没装时跳过对应测试（只装核心循环时 CI 不会因 ENOENT 失败） */
+const optionalMissing = (p) => (existsSync(join(HERE, '../..', p)) ? false : `${p} 未安装（可选模块），跳过`);
 const root = mkdtempSync(join(tmpdir(), 'cloud-'));
 after(() => rmSync(root, { recursive: true, force: true }));
 const KEY = 'k';
@@ -98,7 +101,7 @@ test('select：没有可审的 PR 时输出空 pr；--pr 只看指定的那个',
   assert.doesNotMatch(r.log, /pr list/);
 });
 
-test('gpt-review.yml：review 只读且以 :read-only 运行 codex、不持有签名密钥；decide 不运行模型；全局串行；开关', () => {
+test('gpt-review.yml：review 只读且以 :read-only 运行 codex、不持有签名密钥；decide 不运行模型；全局串行；开关', { skip: optionalMissing('.github/workflows/gpt-review.yml') }, () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/gpt-review.yml'), 'utf8');
   const job = (name) => yml.match(new RegExp(`^  ${name}:\\n((?:(?: {4,}.*)?\\n)*)`, 'm'))?.[1] ?? '';
   const [select, review, decide] = ['select', 'review', 'decide'].map(job);
@@ -240,7 +243,7 @@ test('loadReview：缺产物或元数据、无法解析 → 不采用；全部�
   assert.equal(ok.review.verdict, 'approve');
 });
 
-test('gpt-review.yml：产物名带 run_attempt、由 review 输出传给 decide；review 未成功不下载；元数据由工作流步骤写入', () => {
+test('gpt-review.yml：产物名带 run_attempt、由 review 输出传给 decide；review 未成功不下载；元数据由工作流步骤写入', { skip: optionalMissing('.github/workflows/gpt-review.yml') }, () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/gpt-review.yml'), 'utf8');
   assert.match(yml, /artifact=gpt-review-\$GITHUB_RUN_ID-\$GITHUB_RUN_ATTEMPT/);
   assert.match(yml, /artifact: \$\{\{ steps\.wrap\.outputs\.artifact \}\}/);
@@ -283,7 +286,7 @@ test('loadReview：合法 JSON 但结构不符 → 不采用，按基础设施�
   assert.match(states.at(-1), /^stopped/);
 });
 
-test('gpt-review.yml：无 pull_request 入口；每个任务都校验 github.ref 为 main', () => {
+test('gpt-review.yml：无 pull_request 入口；每个任务都校验 github.ref 为 main', { skip: optionalMissing('.github/workflows/gpt-review.yml') }, () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/gpt-review.yml'), 'utf8');
   const on = yml.match(/^on:\n((?: .*\n)*)/m)[1];
   assert.doesNotMatch(on, /pull_request/);
@@ -332,7 +335,7 @@ test('prompt：PR 被暂时重置到本地已有的祖先（或检出与选定�
   }
 });
 
-test('gpt-review.yml：prompt 收到 select 选定的 head', () => {
+test('gpt-review.yml：prompt 收到 select 选定的 head', { skip: optionalMissing('.github/workflows/gpt-review.yml') }, () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/gpt-review.yml'), 'utf8');
   assert.match(yml, /cloud\.mjs prompt --pr "\$\{\{ needs\.select\.outputs\.pr \}\}" --head "\$\{\{ needs\.select\.outputs\.head \}\}"/);
 });
@@ -471,7 +474,7 @@ test('followUpIssues：每条意见一个 issue，含来源、位置、建议与
   for (const k of ['PR #7', 'a.ts:1', '## 建议', '## 验收标准', '- [ ]']) assert.ok(a.body.includes(k), k);
 });
 
-test('gpt-review.yml：decide 读取仓库变量 ROUND_LIMIT_MODE', () => {
+test('gpt-review.yml：decide 读取仓库变量 ROUND_LIMIT_MODE', { skip: optionalMissing('.github/workflows/gpt-review.yml') }, () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/gpt-review.yml'), 'utf8');
   assert.match(yml, /ROUND_LIMIT_MODE: \$\{\{ vars\.ROUND_LIMIT_MODE \}\}/);
 });

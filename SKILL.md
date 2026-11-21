@@ -66,6 +66,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 1. **环境检查**：`gh auth status`；`codex --version` 并实测 `codex exec --output-schema` 能产出结构化 JSON（必要时 `-m` 指定当前账号可用的模型）；Node ≥ 22。
 2. **复制模板**到目标仓库根目录（在新分支上）：
    `templates/.github/workflows/{ci,claude}.yml`、`templates/scripts/devloop/*`、`templates/docs/DEVLOOP.md`。
+   可选模块的测试在对应文件没装时自动跳过（只装核心时 `node --test` 显示 skipped，不会 ENOENT）。
    `.gitignore` 先加好 `node_modules/`、`dist/` 等，**提交前看一眼 `git diff --stat`**（曾误提交上千个依赖文件）。
 3. **替换占位符**：`{{PROJECT_RULES}}`（项目规则文件，如 CONTRIBUTING.md）、`{{HARD_RULES}}`（项目红线），在 `review-prompt.md` 与 `claude.yml` 里。
 4. **仓库设置**：

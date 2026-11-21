@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { claudePrompt, combineReviews, extractClaude } from './combine-review.mjs';
 import { buildReviewPrompt, validateReview } from './review-format.mjs';
 
@@ -66,7 +66,9 @@ test('claudePrompt：基于真实的审核提示词改身份，保留全部必�
 
 // 安全回归：Claude 审核步骤不得拿到任何能写文件或执行命令的工具，
 // 也不得加载 PR 里的设置与 MCP。`Bash(git log:*)` 之类的前缀白名单可经 `git log --output=…` 写文件。
-test('gpt-review.yml：Claude 审核只给 Read/Glob/Grep，禁用 Bash 与写工具，不加载 PR 设置', () => {
+// 只装核心循环、没装云端审核时跳过
+const noCloud = existsSync(new URL('../../.github/workflows/gpt-review.yml', import.meta.url)) ? false : 'gpt-review.yml 未安装（可选模块），跳过';
+test('gpt-review.yml：Claude 审核只给 Read/Glob/Grep，禁用 Bash 与写工具，不加载 PR 设置', { skip: noCloud }, () => {
   const yml = readFileSync(new URL('../../.github/workflows/gpt-review.yml', import.meta.url), 'utf8');
   const step = yml.slice(yml.indexOf('- name: Claude 审核'), yml.indexOf('- name: 合并两方结论'));
   assert.ok(step.includes('claude -p'), '找不到 Claude 审核步骤');

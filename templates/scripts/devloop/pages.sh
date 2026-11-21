@@ -12,7 +12,7 @@
 #   WRANGLER   wrangler 调用前缀（默认 "npx -y wrangler@<固定版本>"）
 #   CF_API     Cloudflare API 基地址（默认官方；测试时指向假服务）
 #   SUMMARY    摘要输出文件（默认 $GITHUB_STEP_SUMMARY）
-#   PUBLIC     为 "true" 时公开发布：不再要求 Access 保护（对公众上线是用户的决定，只由用户拨这个仓库变量）
+#   PUBLIC     为 "true" 时公开发布：正式地址不再要求 Access 保护（预览地址仍要求）（对公众上线是用户的决定，只由用户拨这个仓库变量）
 #   ANALYTICS  为 "on" 时启用匿名统计：确保 D1 数据库与表存在、清理超过保留期的记录，连同 functions/ 一起发布
 #   FUNCTIONS_DIR  Pages Functions 目录（取自 main 的 functions/，内含 api/ev.js；schema.sql 在其中）
 #   RETENTION_DAYS 统计记录保留天数（默认 180，提案值；不得超过隐私说明承诺的 180）
@@ -82,16 +82,19 @@ protected() { # protected <主机名>
   loc=${r#* }
   case "$code" in 301 | 302 | 303 | 307 | 308) [[ "$loc" =~ $ACCESS_LOGIN_RE ]] ;; *) return 1 ;; esac
 }
+# 公开模式只豁免正式地址；预览地址无论如何都必须仍受 Access 保护（公开上线时误删通配符那一行，发布会被拒）
+hosts=("$subdomain" "devloop-access-check.$subdomain")
 if [ "${PUBLIC:-}" = "true" ]; then
-  echo "公开发布（PAGES_PUBLIC=true）：不检查 Access，任何人都能访问 https://$subdomain" | tee -a "$SUMMARY"
-else
-  for host in "$subdomain" "devloop-access-check.$subdomain"; do
-    protected "$host" || {
-      echo "::error::$host 未确认受 Cloudflare Access 保护（未登录请求没有被重定向到 Access 登录页），拒绝上传。按 docs/LAUNCH.md 配置后重试；若已决定公开上线，设仓库变量 PAGES_PUBLIC=true。" >&2
-      exit 1
-    }
-  done
+  echo "公开发布（PAGES_PUBLIC=true）：正式地址 https://$subdomain 任何人都能访问；预览地址仍要求 Access 保护" | tee -a "$SUMMARY"
+  hosts=("devloop-access-check.$subdomain")
 fi
+for host in "${hosts[@]}"; do
+  protected "$host" || {
+    if [ "$host" = "$subdomain" ]; then hint="若已决定公开上线，设仓库变量 PAGES_PUBLIC=true。"; else hint="预览地址 *.$subdomain 必须始终受保护：检查 Access 应用的 Destinations 里通配符那一行是否还在。"; fi
+    echo "::error::$host 未确认受 Cloudflare Access 保护（未登录请求没有被重定向到 Access 登录页），拒绝上传。按 docs/LAUNCH.md 配置后重试；$hint" >&2
+    exit 1
+  }
+done
 
 # 5. 匿名统计（ANALYTICS=on）：D1 数据库按名字精确查找或创建 → 建表 → 清理过期记录 → 连同 functions/ 与 D1 绑定一起发布。
 #    任何一步失败都整体失败、不上传（不会发布一个统计端点指向不存在的数据库的版本）。

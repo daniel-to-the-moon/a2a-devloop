@@ -9,6 +9,14 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
+
+const SCHEMA_FIXTURE = `-- 内置副本
+CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, aid TEXT NOT NULL, ev TEXT NOT NULL, day INTEGER NOT NULL, ts INTEGER NOT NULL, v TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS events_day ON events (day);
+CREATE INDEX IF NOT EXISTS events_aid ON events (aid, day);
+`;
+/** 可选模块的文件没装时跳过对应测试（只装核心循环时 CI 不会因 ENOENT 失败） */
+const optionalMissing = (p) => (existsSync(join(HERE, '../..', p)) ? false : `${p} 未安装（可选模块），跳过`);
 const root = mkdtempSync(join(tmpdir(), 'devloop-pages-'));
 const ACCOUNT = 'acc123';
 
@@ -127,7 +135,9 @@ function setup({ projects = [], createFails = false, latest = 'sha1', dist = tru
   const fdir = join(dir, 'functions');
   mkdirSync(join(fdir, 'api'), { recursive: true });
   writeFileSync(join(fdir, 'api', 'ev.js'), '// ev');
-  writeFileSync(join(fdir, 'schema.sql'), readFileSync(join(HERE, '../../functions/schema.sql'), 'utf8'));
+  // 装了统计模块就用真实表结构；只装核心循环时用同结构的内置副本（pages.sh 本身仍被完整测试）
+  const realSchema = join(HERE, '../../functions/schema.sql');
+  writeFileSync(join(fdir, 'schema.sql'), existsSync(realSchema) ? readFileSync(realSchema, 'utf8') : SCHEMA_FIXTURE);
   return { run, wrangler: () => read('wrangler.log'), summary: () => read('summary.md'), read, fdir };
 }
 
@@ -230,12 +240,20 @@ test('ci.yml：pages 任务只在 main 上（push 或 deploy_main 触发）运�
   assert.match(body, /DEPLOY: \$\{\{ vars\.PAGES_DEPLOY \}\}/);
 });
 
-test('公开发布（PUBLIC=true）：不要求 Access 也上传；未设置时仍拒绝未保护的地址', async () => {
-  const pub = setup({ projects: ['my-app'], access: { '*': 'open' } });
+test('公开发布（PUBLIC=true）：正式地址不要求 Access 也上传；未设置时仍拒绝未保护的地址', async () => {
+  const pub = setup({ projects: ['my-app'], access: { 'my-app.pages.dev': 'open', '*': 'redirect' } });
   const r = await pub.run({ DEPLOY: 'true', PUBLIC: 'true' });
   assert.equal(r.code, 0, r.err);
   assert.match(pub.wrangler(), /pages deploy/);
   assert.match(pub.summary(), /公开发布/);
+  // 公开模式下预览地址仍须受保护：通配符被误删时拒绝上传
+  for (const access of [{ '*': 'open' }, { 'my-app.pages.dev': 'open', '*': 'forbidden' }]) {
+    const t = setup({ projects: ['my-app'], access });
+    const bad = await t.run({ DEPLOY: 'true', PUBLIC: 'true' });
+    assert.notEqual(bad.code, 0, JSON.stringify(access));
+    assert.match(bad.err, /预览地址/);
+    assert.equal(t.wrangler(), '', JSON.stringify(access));
+  }
   for (const PUBLIC of ['', 'false', 'TRUE', 'yes']) {
     const t = setup({ projects: ['my-app'], access: { '*': 'open' } });
     assert.notEqual((await t.run({ DEPLOY: 'true', PUBLIC })).code, 0, PUBLIC);
@@ -345,7 +363,7 @@ test('保留期清理（d1-retention.sh，与发布解耦）：有库就删过�
 
 // 隐私说明里的天数与脚本上限必须是同一个数。
 // 模板里的“隐私说明”是 docs/ANALYTICS.md；项目把对用户展示的隐私文案放在别处时，把这里的路径改过去。
-test('保留期上限与隐私说明一致', () => {
+test('保留期上限与隐私说明一致', { skip: optionalMissing('docs/ANALYTICS.md') }, () => {
   const text = readFileSync(join(HERE, '../../docs/ANALYTICS.md'), 'utf8');
   const promised = /满 (\d+) 天自动删除/.exec(text)?.[1];
   assert.equal(promised, '180');
@@ -354,7 +372,7 @@ test('保留期上限与隐私说明一致', () => {
   }
 });
 
-test('analytics-retention.yml：每天定时、只在 main 上运行、只读权限，调用 d1-retention.sh 且不依赖 ANALYTICS 开关', () => {
+test('analytics-retention.yml：每天定时、只在 main 上运行、只读权限，调用 d1-retention.sh 且不依赖 ANALYTICS 开关', { skip: optionalMissing('.github/workflows/analytics-retention.yml') }, () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/analytics-retention.yml'), 'utf8');
   assert.match(yml, /schedule:\n\s+- cron: '17 19 \* \* \*'/);
   assert.match(yml, /if: github\.ref == 'refs\/heads\/main' && vars\.PAGES_PROJECT != ''$/m);
@@ -364,7 +382,7 @@ test('analytics-retention.yml：每天定时、只在 main 上运行、只读权
 });
 
 // 发布时 pages.sh 也会清理一次，必须与每日清理用同一个保留期，否则 RETENTION_DAYS 调大时会多删
-test('ci.yml 与 analytics-retention.yml 传同一个 RETENTION_DAYS 给清理脚本', () => {
+test('ci.yml 与 analytics-retention.yml 传同一个 RETENTION_DAYS 给清理脚本', { skip: optionalMissing('.github/workflows/analytics-retention.yml') }, () => {
   const expr = "RETENTION_DAYS: ${{ vars.RETENTION_DAYS || '180' }}";
   const ci = readFileSync(join(HERE, '../../.github/workflows/ci.yml'), 'utf8');
   const step = ci.slice(ci.indexOf('- name: 发布到 Cloudflare Pages'));

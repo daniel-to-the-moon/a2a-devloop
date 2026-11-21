@@ -6,7 +6,7 @@
 main 更新 ─► ci.yml test（测试 + 构建 + 浏览器冒烟）─► pages 任务（pages.sh）
                                                   ├─ PAGES_DEPLOY != true：只确保项目存在、打印地址，不上传
                                                   ├─ PAGES_PUBLIC != true：上传前确认正式 + 预览地址都被 Access 拦截，否则拒绝
-                                                  ├─ PAGES_PUBLIC == true：正式地址公开，预览地址仍应由 Access 保护
+                                                  ├─ PAGES_PUBLIC == true：正式地址公开，预览地址仍必须被 Access 拦截，否则拒绝
                                                   └─ ANALYTICS == on：查找/创建 D1、建表、清理过期记录，连同 functions/ 一起发布
 云端审核合并后（GITHUB_TOKEN 推 main 不触发 push）：decide 主动触发 ci.yml -f deploy_main=true 走同一条发布路径
 ```
@@ -17,7 +17,7 @@ main 更新 ─► ci.yml test（测试 + 构建 + 浏览器冒烟）─► page
 |---|---|---|
 | `PAGES_PROJECT` | Pages 项目名（小写字母、数字、连字符） | 设了才运行 pages 任务与每日清理；D1 库名是 `<项目名>-analytics` |
 | `PAGES_DEPLOY` | `true` / 其他 | `true` 才上传；否则只确保项目存在并在运行摘要里打印地址 |
-| `PAGES_PUBLIC` | `true` / 其他 | `true` 才允许正式地址不受 Access 保护；未设时只要 Access 撤掉，发布就会被拒（防误公开） |
+| `PAGES_PUBLIC` | `true` / 其他 | `true` 才允许正式地址不受 Access 保护；未设时只要 Access 撤掉，发布就会被拒（防误公开）。预览地址在任何模式下都必须受保护 |
 | `ANALYTICS` | `on` / `off` | 匿名统计（`docs/ANALYTICS.md`）。关闭用 `off`，**不要删除变量** |
 | `RETENTION_DAYS` | 1–180 | 统计保留天数，只能改短 |
 
