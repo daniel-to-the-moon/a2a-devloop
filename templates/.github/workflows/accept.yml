@@ -96,7 +96,8 @@ jobs:
     if: github.ref == 'refs/heads/main'
     # 与 gpt-review.yml 审核任务同一镜像（26.04 上 2026-11-21 首次评分连不上网关，未查明前先固定）
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # 评分脚本总时限 15 分钟（gates.json judge.deadlineMs 可改），这里多留下载截图与上传结果的时间
+    timeout-minutes: 25
     permissions:
       contents: read
       actions: read

@@ -157,6 +157,18 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
     const dead2 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, retries: 2 }, fs, sleep, fetchImpl: async () => ({ ok: true, status: 200, text: async () => { throw err; } }) });
     assert.match(dead2.reason, /读取评分服务响应失败 .*(超时|ECONNRESET).*已重试 2 次/);
   }
+  // 总时限：自检重试后恢复、正式评分又一直超时，到截止时间就停下返回 error（不被任务超时取消）
+  let clock = 0;
+  const tick = async (ms) => { clock += ms; };
+  const slow = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+  const seen = [];
+  let k = 0;
+  const late = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, deadlineMs: 600_000, timeoutMs: 300_000 }, fs, sleep: tick, now: () => clock,
+    fetchImpl: async (u, i) => { k++; seen.push(i.signal); clock += 300_000; if (k === 2) return rig('openai', [CANARY]).fetchImpl(u, i); throw slow; } });
+  assert.equal(late.verdict, 'error');
+  assert.match(late.reason, /已到总时限|超出总时限/);
+  assert.ok(clock <= 600_000 + 300_000, `不超过截止时间太多：${clock}`);
+  assert.ok(k <= 3, `到时限就不再发请求：${k}`);
   // 200 但不是 JSON：格式错误，不重试
   let nj = 0;
   const bad = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep, fetchImpl: async () => { nj++; return { ok: true, status: 200, text: async () => '<html>' }; } });

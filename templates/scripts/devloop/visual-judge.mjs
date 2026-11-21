@@ -171,7 +171,7 @@ export function pickModel(provider, { model, env, cfg }) {
   return model || env.VISUAL_MODEL || (provider === 'openai' ? env.GPT_MODEL : '') || cfg.model || '';
 }
 
-export async function run({ provider = 'openai', model: modelArg, shotsDir, baselineDir, referencePath, stylePath, title, env, cfg, fetchImpl = fetch, fs = { existsSync, statSync, readFileSync }, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export async function run({ provider = 'openai', model: modelArg, shotsDir, baselineDir, referencePath, stylePath, title, env, cfg, fetchImpl = fetch, fs = { existsSync, statSync, readFileSync }, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now }) {
   if (!PROVIDERS.includes(provider)) return { verdict: 'error', reason: `未知的评分服务：${provider}`, provider };
   // shots：必需截图，缺一张就不评（不能让缺图的 PR 拿到“通过”）；optionalShots：有就一起评（例如以后才产出的特写）
   const wanted = [...cfg.shots, ...(cfg.optionalShots ?? [])];
@@ -187,11 +187,16 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
   names.reference = Boolean(reference);
   const { url, headers } = endpoint(provider, env);
   // 网络错误、超时、429 与 5xx 视为暂时故障，退避重试（2026-11-21 #73：网关一时不可用，只得到一句 “fetch failed”）
+  // 总时限：自检 + 正式评分的全部调用与退避共用一个截止时间，必须小于 accept.yml judge 任务的 timeout-minutes 并留出上传时间，
+  // 到期返回结构化 error（写出 judge.json），不会被任务超时直接取消（GPT 审核 #74 第 2 轮 major）
   const attempts = cfg.retries ?? 3;
+  const deadline = now() + (cfg.deadlineMs ?? 15 * 60_000);
+  const left = () => deadline - now();
   const once = async (payload) => {
+    if (left() <= 0) throw new Error('评分超出总时限');
     let r;
     try {
-      r = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(cfg.timeoutMs ?? 300000) });
+      r = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(Math.min(cfg.timeoutMs ?? 300000, left())) });
     } catch (e) {
       throw Object.assign(new Error(`连不上评分服务 ${new URL(url).host}：${netReason(e)}`), { transient: true });
     }
@@ -217,9 +222,11 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
       try {
         return await once(payload);
       } catch (e) {
-        if (!e.transient || i >= attempts) throw i > 1 ? new Error(`${e.message}（已重试 ${i} 次）`) : e;
+        const wait = (cfg.retryDelayMs ?? 15000) * i;
+        const outOfTime = left() - wait <= 0;
+        if (!e.transient || i >= attempts || outOfTime) throw i > 1 || outOfTime ? new Error(`${e.message}（已重试 ${i} 次${outOfTime ? '，已到总时限' : ''}）`) : e;
         console.error(`第 ${i} 次调用失败，稍后重试：${e.message}`);
-        await sleep((cfg.retryDelayMs ?? 15000) * i);
+        await sleep(wait);
       }
     }
   };
