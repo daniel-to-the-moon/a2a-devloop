@@ -53,3 +53,11 @@ test('gpt-review.yml：作者是 GPT 时跳过 GPT 审核方，Claude 必审（�
   assert.match(yml, /- name: 合并两方结论\n {8}if: vars\.SECOND_REVIEW != 'off' && needs\.select\.outputs\.author != 'gpt'/);
   assert.match(yml, /combine-review\.mjs solo --claude/);
 });
+
+test('视觉验收未达标的修复同样交回作者（accept.mjs report 按 PR 分支选 codex.yml / claude.yml）', () => {
+  const src = readFileSync(join(HERE, 'accept.mjs'), 'utf8');
+  assert.match(src, /'--json', 'headRefOid,headRefName,isCrossRepository,state,comments'/);
+  assert.match(src, /const wf = fixWorkflow\(prAuthor\(now\)\);/);
+  assert.match(src, /gh\(\['workflow', 'run', wf, '-f', `pr=\$\{pr\}`\]\)/);
+  assert.doesNotMatch(src, /'run', 'claude\.yml'/);
+});

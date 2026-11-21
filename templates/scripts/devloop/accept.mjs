@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eligible, hasSkipLabel } from './policy.mjs';
-import { CLOUD_REVIEWER_LOGINS, notifyLine } from './review-format.mjs';
+import { CLOUD_REVIEWER_LOGINS, fixWorkflow, notifyLine, prAuthor } from './review-format.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 /** gates.json 不存在 → null（验收与排期模块未安装，云端审核照旧） */
@@ -146,7 +146,7 @@ export function reportPlan({ pr, head, judge, preview, runUrl, rounds, maxRounds
       lines.push(`结论：未达标（${judge.reason}）。已 ${rounds + 1} 轮未达标（上限 ${maxRounds}），停下等用户决定（已加 needs-user）。`);
       return { action: 'stop', labelsAdd: ['needs-user'], labelsRemove: [visual.waitLabel], body: lines.join('\n') + notifyLine(env) };
     }
-    lines.push(`结论：未达标（${judge.reason}）。交给云端 Claude 按上面的意见修改（第 ${rounds + 1} 轮，上限 ${maxRounds}）。`);
+    lines.push(`结论：未达标（${judge.reason}）。交回 PR 作者（云端执行者）按上面的意见修改（第 ${rounds + 1} 轮，上限 ${maxRounds}）。`);
     // 修复期间保留等待标签：isAwaiting 只认当前 head，Claude 推了新提交自然失效；摘掉的话同一 head 会被再审、再评分，白白耗掉轮次
     return { action: 'fix', labelsAdd: [], labelsRemove: [], body: lines.join('\n') };
   }
@@ -168,7 +168,9 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   const head = arg('head');
   let judge = null;
   try { judge = JSON.parse(readFileSync(arg('judge'), 'utf8')); } catch { judge = { verdict: 'error', reason: '没有评分结果' }; }
-  const now = JSON.parse(gh(['pr', 'view', String(pr), '--json', 'headRefOid,state,comments']));
+  const now = JSON.parse(gh(['pr', 'view', String(pr), '--json', 'headRefOid,headRefName,isCrossRepository,state,comments']));
+  // 视觉修复交回 PR 作者（GPT 写的 codex/* → codex.yml，否则 claude.yml）
+  const wf = fixWorkflow(prAuthor(now));
   if (now.state !== 'OPEN' || now.headRefOid !== head) {
     console.log(`跳过：PR 已关闭或有新提交（${String(now.headRefOid).slice(0, 8)}）`);
     process.exit(0);
@@ -181,11 +183,11 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   for (const l of plan.labelsRemove) { try { gh(['pr', 'edit', String(pr), '--remove-label', l]); } catch { /* 标签不在 */ } }
   if (plan.action === 'fix') {
     try {
-      gh(['workflow', 'run', 'claude.yml', '-f', `pr=${pr}`]);
+      gh(['workflow', 'run', wf, '-f', `pr=${pr}`]);
     } catch (e) {
       // 修复没触发成功：等待标签还在，同一 head 会一直被跳过 → 转 needs-user 并 @ 人，写明手动命令
       gh(['pr', 'edit', String(pr), '--add-label', 'needs-user']);
-      gh(['pr', 'comment', String(pr), '--body', `${VISUAL_PREFIX}\n\n触发云端 Claude 修复失败（${String(e.message).split('\n')[0]}），自动循环停下（已加 needs-user）。排除原因后手动执行：\`gh workflow run claude.yml -f pr=${pr}\`，再摘掉 needs-user。${notifyLine()}`]);
+      gh(['pr', 'comment', String(pr), '--body', `${VISUAL_PREFIX}\n\n触发云端修复失败（${wf}：${String(e.message).split('\n')[0]}），自动循环停下（已加 needs-user）。排除原因后手动执行：\`gh workflow run ${wf} -f pr=${pr}\`，再摘掉 needs-user。${notifyLine()}`]);
       throw e;
     }
   }
