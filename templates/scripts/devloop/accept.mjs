@@ -99,7 +99,8 @@ export function acceptanceGate({ d, pr, head, base, files, markers, gates, accep
   for (const [name, color, desc] of acceptLabels(gates.visual)) {
     try { ghR(['label', 'create', name, '--color', color, '--description', desc, '--force']); } catch { /* 尽力；随后加标签失败会让本次运行失败 */ }
   }
-  if (acc === 'stale') { try { ghR(['pr', 'edit', String(pr), '--remove-label', gates.visual.acceptLabel]); } catch { /* 尽力 */ } }
+  // 不作数的 accepted（过期，或不是所有者打的）一律摘掉：留着会让 isAwaiting 认为不在等，每轮重新审核、重新预览，循环不停
+  if (acc !== 'accepted') { try { ghR(['pr', 'edit', String(pr), '--remove-label', gates.visual.acceptLabel]); } catch { /* 标签本来就不在 */ } }
   const nd = {
     state: 'retry', reason: 'accept', merge: false, addLabel: gates.visual.waitLabel,
     text: `审核通过 + 合并后代码测试通过。本 PR 改动画面，合并前需要视觉验收${acc === 'stale' ? '（之前的 accepted 不对应最新提交，已失效）' : ''}：正在发布预览并评分，结果会另发一条评论；用户加 \`${gates.visual.acceptLabel}\` 标签后下一轮合并。`,
@@ -178,6 +179,15 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   gh(['pr', 'comment', String(pr), '--body-file', f]);
   for (const l of plan.labelsAdd) gh(['pr', 'edit', String(pr), '--add-label', l]);
   for (const l of plan.labelsRemove) { try { gh(['pr', 'edit', String(pr), '--remove-label', l]); } catch { /* 标签不在 */ } }
-  if (plan.action === 'fix') gh(['workflow', 'run', 'claude.yml', '-f', `pr=${pr}`]);
+  if (plan.action === 'fix') {
+    try {
+      gh(['workflow', 'run', 'claude.yml', '-f', `pr=${pr}`]);
+    } catch (e) {
+      // 修复没触发成功：等待标签还在，同一 head 会一直被跳过 → 转 needs-user 并 @ 人，写明手动命令
+      gh(['pr', 'edit', String(pr), '--add-label', 'needs-user']);
+      gh(['pr', 'comment', String(pr), '--body', `${VISUAL_PREFIX}\n\n触发云端 Claude 修复失败（${String(e.message).split('\n')[0]}），自动循环停下（已加 needs-user）。排除原因后手动执行：\`gh workflow run claude.yml -f pr=${pr}\`，再摘掉 needs-user。${notifyLine()}`]);
+      throw e;
+    }
+  }
   console.log(`视觉验收：${plan.action}`);
 }

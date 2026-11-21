@@ -200,6 +200,7 @@ test('合并前把关 acceptanceGate：只拦“要合并、改画面、当前 h
   const r = acceptanceGate({ ...base, d: merge, files: ['src/client/a.ts'], acceptance: () => 'none' });
   assert.deepEqual([r.d.state, r.d.reason, r.d.merge, r.d.addLabel], ['retry', 'accept', false, 'awaiting-acceptance']);
   assert.deepEqual(r.accept, { head: 'h1', run: '123' });
+  assert.ok(calls.includes('pr edit 7 --remove-label accepted'), '不作数的 accepted（例如不是所有者打的）也摘掉，免得每轮重来');
   assert.ok(calls[0].startsWith('label create awaiting-acceptance') && calls[1].startsWith('label create accepted'));
   assert.deepEqual(followUpsAccept(7, r.accept), [['workflow', 'run', 'accept.yml', '--ref', 'main', '-f', 'pr=7', '-f', 'head=h1', '-f', 'run=123']]);
   // 已确认，但 main 在预览之后变了：main 改了画面文件 / 查不到改了什么 → 失效重来；只改了别的 → 仍有效
