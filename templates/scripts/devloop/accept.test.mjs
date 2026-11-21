@@ -77,7 +77,7 @@ test('视觉评分结论：通过 → 等用户；未达标 → 交 Claude 修�
   const fail = { verdict: 'fail', scores, overall: 5, notes: ['车身太灰'], reason: '平均 5 < 6', model: 'gpt' };
   const fix = reportPlan({ ...base, rounds: 0, judge: fail });
   assert.equal(fix.action, 'fix');
-  assert.deepEqual(fix.labelsRemove, [V.waitLabel]);
+  assert.deepEqual(fix.labelsRemove, [], '修复期间保留等待标签，同一 head 不再被审、被评分');
   assert.match(fix.body, /结论：未达标/);
   assert.equal(reportPlan({ ...base, rounds: 2, judge: fail }).action, 'stop');
   const err = reportPlan({ ...base, rounds: 0, judge: { verdict: 'error', reason: '多模态自检失败' } });
@@ -202,6 +202,14 @@ test('合并前把关 acceptanceGate：只拦“要合并、改画面、当前 h
   assert.deepEqual(r.accept, { head: 'h1', run: '123' });
   assert.ok(calls[0].startsWith('label create awaiting-acceptance') && calls[1].startsWith('label create accepted'));
   assert.deepEqual(followUpsAccept(7, r.accept), [['workflow', 'run', 'accept.yml', '--ref', 'main', '-f', 'pr=7', '-f', 'head=h1', '-f', 'run=123']]);
+  // 已确认，但 main 在预览之后变了：main 改了画面文件 / 查不到改了什么 → 失效重来；只改了别的 → 仍有效
+  const waited = [{ state: 'retry', reason: 'accept', head: 'h1', base: 'b1', at: '2026-01-01T00:00:00Z' }];
+  const vb = { ...base, d: merge, files: ['src/client/a.ts'], markers: waited, acceptance: () => 'accepted' };
+  assert.equal(acceptanceGate({ ...vb, base: 'b1' }).d, merge, 'main 没变');
+  assert.equal(acceptanceGate({ ...vb, base: 'b2', mainChanged: () => ['README.md'] }).d, merge, 'main 只改了非画面文件');
+  assert.equal(acceptanceGate({ ...vb, base: 'b2', mainChanged: () => ['src/client/b.ts'] }).d.reason, 'accept', 'main 改了画面');
+  assert.equal(acceptanceGate({ ...vb, base: 'b2', mainChanged: () => { throw new Error('x'); } }).d.reason, 'accept', '查不到按变了处理');
+  assert.equal(acceptanceGate({ ...vb, base: 'b2' }).d.reason, 'accept', '没传 mainChanged 按变了处理');
   // 确认已失效：摘掉旧 accepted；拿不到运行号就不触发，并在评论里说明
   calls.length = 0;
   const s = acceptanceGate({ ...base, d: merge, files: ['src/client/a.ts'], runUrl: null, acceptance: () => 'stale' });

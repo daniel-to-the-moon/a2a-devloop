@@ -22,7 +22,7 @@ import { runCi } from './ci.mjs';
 import { acquireLock, mergeAndPush, reviewCacheKey, uniqueDir, withWorktree } from './gitops.mjs';
 import { decide, eligible, hasTerminal, lastFindings, limitMode, roundsUsed, shouldReview } from './policy.mjs';
 import { createPrState } from './prstate.mjs';
-import { acceptanceGate, followUpsAccept, isAwaiting, loadGates, ownerAcceptance } from './accept.mjs';
+import { acceptanceGate, compareFiles, followUpsAccept, isAwaiting, loadGates, ownerAcceptance } from './accept.mjs';
 import { drainPending, followUpItems } from './followups.mjs';
 import { buildReviewPrompt, formatReview, notifyLine, touchesWorkflows, validateReview } from './review-format.mjs';
 
@@ -166,7 +166,8 @@ async function reviewLocked(pr, { merge }) {
   // 发布把关：与云端同一个前置条件（accept.mjs acceptanceGate）。本机兜底改工作流的 PR、或云端审核关闭时，改画面的 PR 同样要预览 + 用户确认
   const gates = loadGates();
   const gated = acceptanceGate({
-    d, pr, head, files: now.files, markers: now.markers, gates, runUrl: ci.url,
+    d, pr, head, base: ci.base, files: now.files, markers: now.markers, gates, runUrl: ci.url,
+    mainChanged: compareFiles({ gh: (args) => sh('gh', args), repo: REPO }),
     acceptance: gates && ownerAcceptance({ gh: (args) => sh('gh', args), repo: REPO, owner: REPO.split('/')[0], label: gates.visual.acceptLabel }),
     ghR: gh,
   });
@@ -208,7 +209,15 @@ async function reviewLocked(pr, { merge }) {
   }
   // 评论（含 retry:accept 签名标记）发出后再触发预览与视觉评分：accept.yml 的结果以这条标记为准
   for (const a of followUpsAccept(pr, gated.accept)) {
-    try { gh(a); } catch (e) { log(`#${pr} 触发预览与视觉验收失败：${e.message.split('\n')[0]}`); }
+    try {
+      gh(a);
+    } catch (e) {
+      // 触发失败：等待标签与 retry:accept 已发出，watch 会一直跳过这个 head → 摘掉等待标签（下一轮重新审核、再触发），并 @ 人
+      const why = e.message.split('\n')[0];
+      log(`#${pr} 触发预览与视觉验收失败：${why}`);
+      try { gh(['pr', 'edit', String(pr), '--remove-label', gates.visual.waitLabel]); } catch { /* 尽力 */ }
+      try { comment(pr, `执行者：devloop（本机审核）\n\n触发预览与视觉验收失败（${why}），已摘掉 \`${gates.visual.waitLabel}\`，下一轮重新审核后再触发；也可手动执行：\`gh ${a.join(' ')}\`${notifyLine(process.env, REPO.split('/')[0], '请留意')}`); } catch { /* 尽力 */ }
+    }
   }
   await processPending({ locked: true });
   const result = { pr, head, state: d.state, ci: ci.status, verdict: rv?.verdict ?? 'error', findings: rv?.findings.length ?? 0 };

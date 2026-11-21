@@ -21,7 +21,7 @@ import { decide, eligible, hasTerminal, lastFindings, limitMode, roundsUsed, sho
 import { createPrState } from './prstate.mjs';
 import { ensureFollowUps, followUpItems } from './followups.mjs';
 import { buildReviewPrompt, formatReview, notifyLine, touchesWorkflows, validateReview } from './review-format.mjs';
-import { acceptanceGate, followUpsAccept, isInFlight, loadGates, ownerAcceptance, queueBlocker, runIdOf } from './accept.mjs';
+import { acceptanceGate, compareFiles, followUpsAccept, isInFlight, loadGates, ownerAcceptance, queueBlocker, runIdOf } from './accept.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts }).trim();
@@ -184,7 +184,7 @@ export async function runDecide({ pr, head, base, reviewResult, reviewPath, meta
   });
   // 发布把关（gates.json）：改画面的 PR 合并前要用户确认（accept.mjs acceptanceGate，本机 devloop.mjs 用同一个）
   let accept = null;
-  ({ d, accept } = acceptanceGate({ d, pr, head, files: now.files, markers: now.markers, gates: io.gates, acceptance: io.acceptance, ghR: io.ghR, runUrl: ci.url }));
+  ({ d, accept } = acceptanceGate({ d, pr, head, base: ci.base, mainChanged: io.mainChanged, files: now.files, markers: now.markers, gates: io.gates, acceptance: io.acceptance, ghR: io.ghR, runUrl: ci.url }));
   if (d.addLabel) io.ghR(['pr', 'edit', String(pr), '--add-label', d.addLabel]);
   if (d.merge) {
     try {
@@ -290,6 +290,7 @@ async function main() {
         mainSha,
         gates: loadGates(),
         // accepted 标签：最后一次由仓库所有者打上、且晚于当前 head 的“等待验收”标记才算数（accept.mjs acceptanceState）
+        mainChanged: compareFiles({ gh, repo: REPO }),
         acceptance: ownerAcceptance({ gh, repo: REPO, owner: trustedReviewer(process.env), label: loadGates()?.visual.acceptLabel }),
         runCi: (p) => runCi({ ...p, io: ciIo, timeoutMs: 30 * 60_000 }),
         fetch: (pr) => sh('git', ['fetch', '-q', 'origin', 'main', `pull/${pr}/head`]),

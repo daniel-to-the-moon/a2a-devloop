@@ -81,9 +81,19 @@ export const acceptLabels = (visual) => [
  * 改为 retry:accept（不合并），确保标签存在并加等待标签由调用方按 d.addLabel 处理，返回需要触发的 accept.yml 参数。
  * acceptance(pr, head, markers) → acceptanceState 的结果。返回 { d, accept: { head, run } | null }
  */
-export function acceptanceGate({ d, pr, head, files, markers, gates, acceptance, ghR, runUrl }) {
+export function acceptanceGate({ d, pr, head, base, files, markers, gates, acceptance, mainChanged = null, ghR, runUrl }) {
   if (!d.merge || !gates || !isVisual(files, gates.visual)) return { d, accept: null };
-  const acc = acceptance(pr, head, markers);
+  let acc = acceptance(pr, head, markers);
+  // 确认的是“被预览的那次组合”（head + 当时的 main）：之后 main 又改了画面文件，合并出来的画面就不是用户看过的，要重新预览确认。
+  // mainChanged(from, to) → 两次 main 之间改动的文件；查不到（抛错 / 没传）按“变了”处理
+  if (acc === 'accepted') {
+    const wait = [...(markers ?? [])].reverse().find((m) => m.state === 'retry' && m.reason === 'accept');
+    if (wait?.base && base && wait.base !== base) {
+      let changed = null;
+      try { changed = mainChanged ? mainChanged(wait.base, base) : null; } catch { changed = null; }
+      if (!changed || isVisual(changed, gates.visual)) acc = 'stale';
+    }
+  }
   if (acc === 'accepted') return { d, accept: null };
   // 标签不存在时 gh pr edit --add-label 会失败：先确保两个标签都在（--force 已存在则只更新）
   for (const [name, color, desc] of acceptLabels(gates.visual)) {
@@ -101,6 +111,9 @@ export function acceptanceGate({ d, pr, head, files, markers, gates, acceptance,
 
 /** 需要触发的 accept.yml（gh 参数列表，不含 -R） */
 export const followUpsAccept = (pr, accept) => (accept ? [['workflow', 'run', 'accept.yml', '--ref', 'main', '-f', `pr=${pr}`, '-f', `head=${accept.head}`, '-f', `run=${accept.run}`]] : []);
+
+/** mainChanged(from, to)：两次 main 之间改动的文件（GitHub compare API，不依赖本地历史） */
+export const compareFiles = ({ gh, repo }) => (from, to) => gh(['api', `repos/${repo}/compare/${from}...${to}`, '--jq', '.files[].filename']).split('\n').map((l) => l.trim()).filter(Boolean);
 
 /** acceptance(pr, head, markers)：读 PR 的标签事件，按 acceptanceState 判定。owner：唯一能确认的账号（仓库所有者） */
 export const ownerAcceptance = ({ gh, repo, owner, label }) => (p, h, markers) => acceptanceState({
@@ -133,7 +146,8 @@ export function reportPlan({ pr, head, judge, preview, runUrl, rounds, maxRounds
       return { action: 'stop', labelsAdd: ['needs-user'], labelsRemove: [visual.waitLabel], body: lines.join('\n') + notifyLine(env) };
     }
     lines.push(`结论：未达标（${judge.reason}）。交给云端 Claude 按上面的意见修改（第 ${rounds + 1} 轮，上限 ${maxRounds}）。`);
-    return { action: 'fix', labelsAdd: [], labelsRemove: [visual.waitLabel], body: lines.join('\n') };
+    // 修复期间保留等待标签：isAwaiting 只认当前 head，Claude 推了新提交自然失效；摘掉的话同一 head 会被再审、再评分，白白耗掉轮次
+    return { action: 'fix', labelsAdd: [], labelsRemove: [], body: lines.join('\n') };
   }
   const why = judge?.verdict === 'pass' ? '模型评分达标' : `模型评分没有完成（${judge?.reason ?? '未知原因'}），请直接人工看`;
   lines.push(`结论：${why}，等你拍板。满意就给本 PR 加 \`${visual.acceptLabel}\` 标签，下一轮自动合并；不满意就在下面写意见。`);
