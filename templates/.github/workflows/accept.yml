@@ -85,7 +85,11 @@ jobs:
           DIST: ${{ github.workspace }}/dist
           PREVIEW_BRANCH: pr-${{ inputs.pr }}
           REPO: ${{ github.repository }}
-        run: bash scripts/devloop/pages.sh | tee -a "$GITHUB_OUTPUT"
+        # 日志照常打到标准输出；只把 preview=… 这一行写进 GITHUB_OUTPUT（其他行不是合法的输出赋值，Codex 审核 #70）
+        run: |
+          set -euo pipefail
+          bash scripts/devloop/pages.sh | tee "$RUNNER_TEMP/pages.log"
+          grep -m1 '^preview=https://' "$RUNNER_TEMP/pages.log" >> "$GITHUB_OUTPUT" || true
 
   judge:
     needs: check

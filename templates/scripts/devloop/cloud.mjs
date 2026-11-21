@@ -185,9 +185,13 @@ export async function runDecide({ pr, head, base, reviewResult, reviewPath, meta
   // 发布把关（gates.json）：改画面的 PR 合并前要用户确认。没确认 → 不合并，记 retry:accept，触发预览与视觉评分
   let accept = null;
   if (d.merge && io.gates && isVisual(now.files, io.gates.visual)) {
-    const acc = io.acceptance(pr, head);
+    const acc = io.acceptance(pr, head, now.markers);
     if (acc !== 'accepted') {
       const run = runIdOf(ci.url);
+      // 标签不存在时 gh pr edit --add-label 会失败：先确保两个标签都在（--force 已存在则只更新）
+      for (const [name, color, desc] of [[io.gates.visual.waitLabel, 'FBCA04', '等用户视觉验收（看预览后加 accepted）'], [io.gates.visual.acceptLabel, '0E8A16', '用户已确认画面，可以合并']]) {
+        try { io.ghR(['label', 'create', name, '--color', color, '--description', desc, '--force']); } catch { /* 尽力；随后加标签失败会让本次运行失败 */ }
+      }
       if (acc === 'stale') { try { io.ghR(['pr', 'edit', String(pr), '--remove-label', io.gates.visual.acceptLabel]); } catch { /* 尽力 */ } }
       d = {
         state: 'retry', reason: 'accept', merge: false, addLabel: io.gates.visual.waitLabel,
@@ -300,12 +304,13 @@ async function main() {
         prState,
         mainSha,
         gates: loadGates(),
-        // accepted 标签：最后一次由仓库所有者打上、且晚于当前 head 的提交时间才算数
-        acceptance: (p, h) => acceptanceState({
+        // accepted 标签：最后一次由仓库所有者打上、且晚于当前 head 的“等待验收”标记才算数（accept.mjs acceptanceState）
+        acceptance: (p, h, markers) => acceptanceState({
           events: JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${REPO}/issues/${p}/events?per_page=100`])).flat(),
           owner: trustedReviewer(process.env),
-          headAt: gh(['api', `repos/${REPO}/commits/${h}`, '-q', '.commit.committer.date']),
           label: loadGates().visual.acceptLabel,
+          markers,
+          head: h,
         }),
         runCi: (p) => runCi({ ...p, io: ciIo, timeoutMs: 30 * 60_000 }),
         fetch: (pr) => sh('git', ['fetch', '-q', 'origin', 'main', `pull/${pr}/head`]),

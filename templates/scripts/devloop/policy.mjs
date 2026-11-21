@@ -56,7 +56,8 @@ export function parseMarkers(comments, { key, reviewer, pr }) {
     const got = Buffer.from(m[5]);
     if (want.length !== got.length || !timingSafeEqual(want, got)) continue;
     const [state, reason] = m[2].split(':');
-    out.push({ state, reason, head: m[3], base: m[4] });
+    // at：评论时间（GitHub 记录，不可由提交伪造），发布把关用它判断用户确认是否晚于“等待验收”
+    out.push({ state, reason, head: m[3], base: m[4], ...(c.createdAt ? { at: c.createdAt } : {}) });
   }
   return out;
 }

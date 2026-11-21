@@ -98,10 +98,15 @@ test('select：不调用 gh api user；跳过改工作流的 PR；认得云端�
 test('select：合并排期——与更早、仍在途的 PR 改同一文件就排队；前面的 PR 等人（needs-user / 等视觉验收）时不挡', { skip: !existsSync(join(HERE, 'gates.json')) && '未安装验收与发布角色（gates.json）' }, () => {
   const busy = { number: 4, view: view('c'.repeat(40), { comments: [botReview(4, 'changes', 'c'.repeat(40))] }) };
   assert.match(select([busy, { number: 5, view: view('d'.repeat(40)) }]).out, /^pr=\n/);
-  for (const labels of [['needs-user'], ['awaiting-acceptance']]) {
-    const parked = { number: 4, view: { ...view('c'.repeat(40)), labels: labels.map((name) => ({ name })) } };
+  // 等视觉验收：标签 + 当前 head 的 retry:accept 签名标记
+  const waitMark = { author: { login: 'github-actions' }, body: `执行者：GPT（云端）\n${marker(KEY, { pr: 4, state: 'retry', reason: 'accept', head: 'c'.repeat(40), base: B })}` };
+  for (const [labels, comments] of [[['needs-user'], []], [['awaiting-acceptance'], [waitMark]]]) {
+    const parked = { number: 4, view: { ...view('c'.repeat(40), { comments }), labels: labels.map((name) => ({ name })) } };
     assert.match(select([parked, { number: 5, view: view('d'.repeat(40)) }]).out, /^pr=5\n/, labels.join());
   }
+  // 等待标签还在，但 head 已换（新提交）：重新处理，照常挡住后面的同文件 PR
+  const moved = { number: 4, view: { ...view('e'.repeat(40), { comments: [waitMark] }), labels: [{ name: 'awaiting-acceptance' }] } };
+  assert.match(select([moved, { number: 5, view: view('d'.repeat(40)) }]).out, /^pr=4\n/);
 });
 
 test('select：没有可审的 PR 时输出空 pr；--pr 只看指定的那个', () => {
@@ -520,6 +525,7 @@ test('runDecide 发布把关：改画面的 PR 审核与 CI 都通过但用户�
   assert.equal(out.state, 'retry');
   assert.ok(!merged(r.calls) && !deployed(r.calls));
   assert.ok(r.full.includes('pr edit 7 --add-label awaiting-acceptance'));
+  assert.ok(r.full.findIndex((c) => c.startsWith('label create awaiting-acceptance')) < r.full.indexOf('pr edit 7 --add-label awaiting-acceptance'), '先建标签再加');
   assert.ok(r.full.includes(`workflow run accept.yml --ref main -f pr=7 -f head=${H} -f run=4242`), r.full.join('\n'));
   assert.ok(r.full.findIndex((c) => c.startsWith('pr comment 7')) < r.full.findIndex((c) => c.startsWith('workflow run accept.yml')), '先评论再触发');
   // 用户已确认 → 合并

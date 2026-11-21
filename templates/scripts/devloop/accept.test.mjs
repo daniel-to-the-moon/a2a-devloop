@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { acceptanceState, isInFlight, isVisual, loadGates, queueBlocker, reportPlan, visualRounds, VISUAL_PREFIX } from './accept.mjs';
+import { acceptanceState, isAwaiting, isInFlight, isVisual, loadGates, queueBlocker, reportPlan, visualRounds, VISUAL_PREFIX } from './accept.mjs';
 import { buildParts, canaryOk, canaryPng, judge, loadShots, outputText, parseVerdict, run, toRequest } from './visual-judge.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -19,9 +19,9 @@ const open = (n, files, labels = []) => ({ number: n, files, labels, state: 'OPE
 test('isVisual：目录前缀与精确文件', { skip }, () => {
   assert.ok(isVisual(['src/geometry/placeholder.ts'], V));
   assert.ok(isVisual(['README.md', 'src/client/scene.ts'], V));
-  assert.ok(!isVisual(['src/shared/economy.ts', 'src/client/scene.ts.bak'], V));
   assert.ok(Array.isArray(loadGates().visual.paths) && loadGates().visual.paths.length, 'gates.json 配了画面路径');
   assert.equal(loadGates(undefined, () => false), null, '没有 gates.json = 不启用');
+  assert.ok(!isVisual(['src/shared/economy.ts', 'src/client/scene.ts.bak'], V));
 });
 
 test('合并排期：只被更早、在途、改同一文件的 PR 挡住；等人的 PR 不挡', { skip }, () => {
@@ -29,22 +29,40 @@ test('合并排期：只被更早、在途、改同一文件的 PR 挡住；等�
   assert.equal(queueBlocker(m, [open(5, ['src/b.ts']), open(7, ['src/a.ts']), m], V), 5);
   assert.equal(queueBlocker(m, [open(12, ['src/a.ts']), m], V), null, '更晚的不挡');
   assert.equal(queueBlocker(m, [open(5, ['src/c.ts']), m], V), null, '不同文件不挡');
-  for (const labels of [['needs-user'], ['hold'], [V.waitLabel]]) assert.equal(queueBlocker(m, [open(5, ['src/a.ts'], labels), m], V), null, labels.join());
+  for (const labels of [['needs-user'], ['hold']]) assert.equal(queueBlocker(m, [open(5, ['src/a.ts'], labels), m], V), null, labels.join());
+  const H = 'a'.repeat(40);
+  const awaiting = { ...open(5, ['src/a.ts'], [V.waitLabel]), headRefOid: H, markers: [{ state: 'retry', reason: 'accept', head: H }] };
+  assert.equal(queueBlocker(m, [awaiting, m], V), null, '等用户验收的不挡');
   assert.equal(queueBlocker(m, [open(5, ['src/a.ts'], [V.waitLabel, V.acceptLabel]), m], V), 5, '用户已确认、马上要合的仍在途');
   assert.equal(queueBlocker(m, [{ ...open(5, ['src/a.ts']), isDraft: true }, m], V), null, '草稿不挡');
-  assert.ok(!isInFlight(open(5, [], [V.waitLabel]), V));
+  assert.ok(isInFlight(open(5, [], [V.waitLabel]), V), '只有标签、没有当前 head 的等待标记：照常处理');
 });
 
-test('用户确认：最后一次是所有者打上、且晚于 head 才算；之后摘掉、别人打、早于新提交都不算', { skip }, () => {
+test('用户确认：绑定在最后一次“等待验收”的 head 上，所有者在它之后打 accepted 才算；换 head（含推更早的提交）、之后摘掉、别人打都不算', { skip }, () => {
+  const H1 = 'a'.repeat(40);
+  const H2 = 'b'.repeat(40);
   const ev = (event, login, at, name = V.acceptLabel) => ({ event, label: { name }, actor: { login }, created_at: at });
-  const headAt = '2026-11-21T10:00:00Z';
-  const st = (events) => acceptanceState({ events, owner: 'owner', headAt, label: V.acceptLabel });
-  assert.equal(st([ev('labeled', 'owner', '2026-11-21T11:00:00Z')]), 'accepted');
-  assert.equal(st([ev('labeled', 'owner', '2026-11-21T09:00:00Z')]), 'stale');
-  assert.equal(st([ev('labeled', 'github-actions[bot]', '2026-11-21T11:00:00Z')]), 'none');
-  assert.equal(st([ev('labeled', 'owner', '2026-11-21T11:00:00Z'), ev('unlabeled', 'owner', '2026-11-21T11:05:00Z')]), 'none');
-  assert.equal(st([ev('labeled', 'owner', '2026-11-21T11:00:00Z'), ev('labeled', 'owner', '2026-11-21T11:01:00Z', 'bug')]), 'accepted');
-  assert.equal(st([]), 'none');
+  const wait = (head, at) => ({ state: 'retry', reason: 'accept', head, base: 'c'.repeat(40), at });
+  const st = (events, markers, head = H1) => acceptanceState({ events, owner: 'owner', label: V.acceptLabel, markers, head });
+  const w1 = [wait(H1, '2026-11-21T10:00:00Z')];
+  assert.equal(st([ev('labeled', 'owner', '2026-11-21T11:00:00Z')], w1), 'accepted');
+  assert.equal(st([ev('labeled', 'owner', '2026-11-21T09:00:00Z')], w1), 'stale', '早于等待验收');
+  assert.equal(st([ev('labeled', 'owner', '2026-11-21T11:00:00Z')], w1, H2), 'stale', 'head 换了');
+  assert.equal(st([ev('labeled', 'owner', '2026-11-21T11:00:00Z')], [wait(H2, '2026-11-21T08:00:00Z'), ...w1], H2), 'stale', '换回更早评过的提交：最后一次等待验收不是它');
+  assert.equal(st([ev('labeled', 'owner', '2026-11-21T11:00:00Z')], []), 'stale', '从没等待验收过');
+  assert.equal(st([ev('labeled', 'github-actions[bot]', '2026-11-21T11:00:00Z')], w1), 'none');
+  assert.equal(st([ev('labeled', 'owner', '2026-11-21T11:00:00Z'), ev('unlabeled', 'owner', '2026-11-21T11:05:00Z')], w1), 'none');
+  assert.equal(st([ev('labeled', 'owner', '2026-11-21T11:00:00Z'), ev('labeled', 'owner', '2026-11-21T11:01:00Z', 'bug')], w1), 'accepted');
+  assert.equal(st([], w1), 'none');
+});
+
+test('等待验收只针对被评过的 head：推了新提交就重新处理', { skip }, () => {
+  const H1 = 'a'.repeat(40);
+  const m = (head) => ({ ...open(5, ['src/a.ts'], [V.waitLabel]), headRefOid: head, markers: [{ state: 'retry', reason: 'accept', head: H1 }] });
+  assert.ok(isAwaiting(m(H1), V));
+  assert.ok(!isAwaiting(m('b'.repeat(40)), V));
+  assert.ok(isInFlight(m('b'.repeat(40)), V));
+  assert.ok(!isAwaiting({ ...m(H1), labels: [V.waitLabel, V.acceptLabel] }, V));
 });
 
 test('视觉评分结论：通过 → 等用户；未达标 → 交 Claude 修，到上限停下；评分没完成 → 交人工，不自动通过', { skip }, () => {

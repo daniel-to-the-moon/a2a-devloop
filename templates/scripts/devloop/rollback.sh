@@ -24,14 +24,18 @@ list=$(cf GET "/deployments?env=production&per_page=25")
 [ "$(jq -r '.success' <<< "$list" 2>/dev/null)" = "true" ] || { echo "::error::读取正式发布列表失败：$(jq -c '.errors // .' <<< "$list" 2>/dev/null || echo "$list")" >&2; exit 1; }
 # 列表按时间倒序；只认成功完成的正式发布
 ok=$(jq -c '[.result[] | select(.environment == "production" and .latest_stage.status == "success") | {id, sha: (.deployment_trigger.metadata.commit_hash // ""), at: .created_on}]' <<< "$list")
-current=$(jq -r '.[0].id // empty' <<< "$ok")
-[ -n "$current" ] || { echo "::error::没有成功的正式发布，无从回滚" >&2; exit 1; }
+# 当前生效的正式发布以项目的 canonical_deployment 为准：回滚过之后，它不一定是最新创建的那次（Codex 审核 #70）
+proj=$(cf GET "")
+[ "$(jq -r '.success' <<< "$proj" 2>/dev/null)" = "true" ] || { echo "::error::读取 Pages 项目失败：$(jq -c '.errors // .' <<< "$proj" 2>/dev/null || echo "$proj")" >&2; exit 1; }
+current=$(jq -r '.result.canonical_deployment.id // empty' <<< "$proj")
+[ -n "$current" ] || { echo "::error::项目没有当前生效的正式发布，无从回滚" >&2; exit 1; }
 if [ -n "${TARGET:-}" ]; then
   target=$(jq -r --arg t "$TARGET" '.[] | select(.id == $t) | .id' <<< "$ok")
   [ -n "$target" ] || { echo "::error::$TARGET 不在最近 25 次成功的正式发布里" >&2; exit 1; }
 else
-  target=$(jq -r '.[1].id // empty' <<< "$ok")
-  [ -n "$target" ] || { echo "::error::只有一次成功的正式发布，没有上一版可回滚" >&2; exit 1; }
+  # 上一版 = 列表（按时间倒序）里排在当前生效发布之后的第一次成功发布
+  target=$(jq -r --arg c "$current" '(map(.id) | index($c)) as $i | if $i == null then empty else (.[$i + 1].id // empty) end' <<< "$ok")
+  [ -n "$target" ] || { echo "::error::找不到当前生效发布（$current）之前的成功正式发布，没有上一版可回滚" >&2; exit 1; }
 fi
 [ "$target" != "$current" ] || { echo "目标就是当前生效的发布，无需回滚" | tee -a "$SUMMARY"; exit 0; }
 sha=$(jq -r --arg t "$target" '.[] | select(.id == $t) | .sha' <<< "$ok")

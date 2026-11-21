@@ -25,10 +25,17 @@ export const VISUAL_PREFIX = '执行者：devloop（视觉验收）';
 const hit = (file, rules) => rules.some((r) => (r.endsWith('/') ? file.startsWith(r) : file === r));
 export const isVisual = (files, visual) => files.some((f) => hit(f, visual.paths));
 
+/** 该 PR 当前 head 是否正在等用户视觉验收：有等待标签、没有确认标签，且最后一条 retry:accept 标记就是当前 head（换了 head 就重新处理） */
+export function isAwaiting(pr, visual) {
+  if (!pr.labels.includes(visual.waitLabel) || pr.labels.includes(visual.acceptLabel)) return false;
+  const last = [...(pr.markers ?? [])].reverse().find((m) => m.state === 'retry' && m.reason === 'accept');
+  return Boolean(last && last.head === pr.headRefOid);
+}
+
 /** PR 是否“在途”：会继续自动推进（打开、非草稿、目标 main、没有等人的标签）。等用户的 PR 不挡别人，免得整条队伍卡在人身上 */
 export function isInFlight(pr, visual) {
   if (!eligible(pr) || hasSkipLabel(pr.labels)) return false;
-  return !(pr.labels.includes(visual.waitLabel) && !pr.labels.includes(visual.acceptLabel));
+  return !isAwaiting(pr, visual);
 }
 
 /** 合并排期：编号更小、仍在途、与 m 改了同一文件的 PR → 返回它的编号（m 排在它后面）；没有则 null */
@@ -39,13 +46,19 @@ export function queueBlocker(m, all, visual) {
 }
 
 /**
+ * 用户确认是否对当前 head 有效。
+ * markers：PR 上的签名标记（带评论时间 at）；只有“最后一条 retry:accept 标记”针对的正是当前 head，
+ * 且仓库所有者在这条标记之后打上 accepted（之后没被摘掉），才算 'accepted'。
+ * 这样确认绑定在“被评分、被预览的那个 head”上：换了 head（包括推一个更早的提交）一律要重新验收，不看提交时间。
  * events：issue 事件（REST /issues/N/events），[{ event, label: { name }, actor: { login }, created_at }]，时间升序。
- * 返回 'accepted'（最后一次相关事件是所有者打上标签，且晚于 headAt）| 'stale'（标签在，但早于当前 head）| 'none'
+ * 返回 'accepted' | 'stale'（标签在，但不对应当前 head 的验收）| 'none'
  */
-export function acceptanceState({ events, owner, headAt, label }) {
+export function acceptanceState({ events, owner, label, markers, head }) {
   const last = [...events].reverse().find((e) => (e.event === 'labeled' || e.event === 'unlabeled') && e.label?.name === label);
   if (!last || last.event !== 'labeled' || last.actor?.login !== owner) return 'none';
-  return Date.parse(last.created_at) >= Date.parse(headAt) ? 'accepted' : 'stale';
+  const wait = [...(markers ?? [])].reverse().find((m) => m.state === 'retry' && m.reason === 'accept');
+  if (!wait || wait.head !== head || !wait.at) return 'stale';
+  return Date.parse(last.created_at) > Date.parse(wait.at) ? 'accepted' : 'stale';
 }
 
 /** 已有几轮视觉验收未达标（以评论计） */

@@ -21,7 +21,7 @@ export function createPrState({ gh, repo, key, whoami = () => gh(['api', 'user',
     const m = JSON.parse(gh(['pr', 'view', String(pr), '--json', FIELDS, '-R', repo]));
     // 本机：每次重新查询当前登录名；云端（GITHUB_TOKEN 无法查 user）：调用方传入 whoami
     const reviewer = whoami();
-    const comments = m.comments.map((c) => ({ author: c.author?.login ?? '', body: c.body }));
+    const comments = m.comments.map((c) => ({ author: c.author?.login ?? '', body: c.body, createdAt: c.createdAt }));
     // 本机审核方（当前登录账号）与云端审核（github-actions）的签名标记都认：两者共用同一把签名密钥
     const reviewers = [reviewer, ...CLOUD_REVIEWER_LOGINS];
     const files = gh(['api', '--paginate', `repos/${repo}/pulls/${pr}/files?per_page=100`, '--jq', '.[] | .filename, (.previous_filename // empty)'])
