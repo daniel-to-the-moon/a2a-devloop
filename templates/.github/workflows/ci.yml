@@ -2,9 +2,11 @@
 # - workflow_dispatch：devloop 审核方触发。把 PR 头部提交合并到指定 main 提交上再测，
 #   保证测试的就是“合并后的代码”；并核对 head / base 与审核方给的完全一致。
 # - pull_request：人工推送的 PR（GITHUB_TOKEN 开的 PR 不会触发，靠上面的 dispatch）。
-# - push main：测试 + 构建，并把 dist 上传为发布产物（Actions artifact）。
+# - push main：测试 + 构建，并把 dist 上传为发布产物（Actions artifact）；设了仓库变量 PAGES_PROJECT 时再由 pages 任务发布到 Cloudflare Pages（见下，可选）。
+# - workflow_dispatch + deploy_main=true（在 main 上触发）：等同 push main。云端审核用 GITHUB_TOKEN 合并后推送 main
+#   不会触发 push 工作流，所以由它显式触发这条发布路径。
 name: ci
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('devloop {0} PR#{1}', inputs.nonce, inputs.pr) || format('ci {0}', github.event_name) }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && (inputs.deploy_main == 'true' && 'deploy main' || format('devloop {0} PR#{1}', inputs.nonce, inputs.pr)) || format('ci {0}', github.event_name) }}
 
 on:
   pull_request:
@@ -12,10 +14,11 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      pr: { description: 'PR 编号', required: true }
-      head: { description: '要测试的 PR 头部提交（完整 SHA）', required: true }
-      base: { description: '要合并到的 main 提交（完整 SHA）', required: true }
-      nonce: { description: '审核方用来找回本次运行的随机串', required: true }
+      pr: { description: 'PR 编号（devloop 合并测试）', required: false }
+      head: { description: '要测试的 PR 头部提交（完整 SHA）', required: false }
+      base: { description: '要合并到的 main 提交（完整 SHA）', required: false }
+      nonce: { description: '审核方用来找回本次运行的随机串', required: false }
+      deploy_main: { description: "'true'：测试并发布当前 main（云端审核合并后触发）", required: false }
 
 permissions:
   contents: read
@@ -27,13 +30,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.base || '' }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_main != 'true' && inputs.base || '' }}
           fetch-depth: 0
           persist-credentials: false
       # 私有仓库拉 PR 头部需要认证：用第二个 checkout（同样不保留凭据）取到子目录，再从本地目录 fetch，
       # 这样后续执行 PR 代码的步骤里不存在任何令牌
       - name: 取 PR 头部（仅 devloop 触发）
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.deploy_main != 'true'
         uses: actions/checkout@v4
         with:
           ref: refs/pull/${{ inputs.pr }}/head
@@ -41,7 +44,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: 合并 PR 头部到指定 main（仅 devloop 触发）
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.deploy_main != 'true'
         env:
           HEAD_SHA: ${{ inputs.head }}
           BASE_SHA: ${{ inputs.base }}
@@ -67,10 +70,86 @@ jobs:
         run: npm test
       - if: steps.app.outputs.yes == '1'
         run: npm run build
+      # 浏览器端到端冒烟验收（可选）：仓库里有 scripts/e2e/smoke.mjs 才运行。真实 Chromium 打开构建产物，走一遍核心路径。
+      # 失败即本任务失败：devloop 不合并、main 不发布。只用构建产物与本机 preview 服务，不接触任何凭据。
+      # 需要项目 devDependencies 里有 playwright；预览命令可用仓库变量 E2E_PREVIEW_CMD 覆盖（须监听 127.0.0.1:4173）。
+      - name: 浏览器冒烟验收
+        id: e2e
+        if: steps.app.outputs.yes == '1' && hashFiles('scripts/e2e/smoke.mjs') != ''
+        env:
+          PREVIEW_CMD: ${{ vars.E2E_PREVIEW_CMD || 'npx vite preview --host 127.0.0.1 --port 4173 --strictPort' }}
+        run: |
+          set -euo pipefail
+          npx playwright install --with-deps chromium
+          bash -c "$PREVIEW_CMD" > "$RUNNER_TEMP/preview.log" 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:4173/ > /dev/null && break; sleep 1; done
+          E2E_ARTIFACTS="$RUNNER_TEMP/e2e" node scripts/e2e/smoke.mjs http://127.0.0.1:4173/
+      - name: 上传冒烟截图
+        if: always() && steps.e2e.conclusion != 'skipped' && steps.e2e.conclusion != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e
+          retention-days: 7
+          if-no-files-found: ignore
       - name: 上传发布产物（main）
-        if: github.event_name == 'push' && steps.app.outputs.yes == '1'
+        if: (github.event_name == 'push' || inputs.deploy_main == 'true') && steps.app.outputs.yes == '1'
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ github.sha }}
           path: dist
           retention-days: 90
+
+  # 发布到 Cloudflare Pages（可选：设仓库变量 PAGES_PROJECT 才运行）。只在 main 更新后运行。逻辑在 scripts/devloop/pages.sh（有测试）。
+  # 不执行仓库里的应用代码：只稀疏检出 main 的 scripts/devloop，下载 test 任务构建好的 dist，用固定版本 wrangler 上传。凭据只在本任务。
+  # 两道开关：每次都按名字精确确保 Pages 项目存在并打印地址；仓库变量 PAGES_DEPLOY=true 后才上传。
+  # 公开上线另需 PAGES_PUBLIC=true（否则要求 Access 保护）；ANALYTICS=on 时连同 functions/ 与 D1 匿名统计一起发布。
+  # 串行发布、保留全部排队（queue: max），上传前核对本次提交仍是 main 最新，避免慢的旧运行或历史重跑把环境回退；
+  # 上传前还会确认正式与预览地址都被 Cloudflare Access 拦截，否则拒绝上传。
+  pages:
+    needs: test
+    if: vars.PAGES_PROJECT != '' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.deploy_main == 'true'))
+    # queue: max 保留所有排队中的发布（默认只留一个、会挤掉排队中的最新发布）；先后顺序不保证，由 pages.sh 的 SHA 检查兜底
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: _devloop
+          # functions/：匿名统计的 Pages Function（取自 main，可信）；只在 ANALYTICS=on 时随站点发布
+          sparse-checkout: |
+            scripts/devloop
+            functions
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        if: vars.PAGES_DEPLOY == 'true'
+        with:
+          name: build-${{ github.sha }}
+          path: dist
+      - name: 发布到 Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PROJECT: ${{ vars.PAGES_PROJECT }}
+          SHA: ${{ github.sha }}
+          DEPLOY: ${{ vars.PAGES_DEPLOY }}
+          DIST: ${{ github.workspace }}/dist
+          # 两个开关都是仓库变量，只由用户拨：PAGES_PUBLIC=true 公开正式地址；ANALYTICS=on/off 匿名统计（关闭用 off，不要删变量）
+          PUBLIC: ${{ vars.PAGES_PUBLIC }}
+          ANALYTICS: ${{ vars.ANALYTICS }}
+          # 与 analytics-retention.yml 同一保留期，发布时顺带的清理不会比配置删得更早
+          RETENTION_DAYS: ${{ vars.RETENTION_DAYS || '180' }}
+          FUNCTIONS_DIR: ${{ github.workspace }}/_devloop/functions
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash _devloop/scripts/devloop/pages.sh

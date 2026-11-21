@@ -1,6 +1,6 @@
 ---
 name: a2a-devloop
-description: 为一个 GitHub 仓库搭建“多 agent 自主开发循环”（A2A devloop）：Claude 在 GitHub Actions 里按 issue 写代码、开 PR、按审核意见修复；GPT（Codex CLI）在用户本机常驻只读审核；CI 测试合并后的代码；审核与测试都通过即自动合并；卡住时打 needs-user 等人。用户说“搭一个 agent 互审自动合并的流程”“Claude 写 GPT 审”“A2A 开发循环”“devloop”“自动审核自动合码”“不想当 agent 之间的传话人”时使用。也用于排查已搭好的 devloop（云端 Claude 秒退、CI 等不到、PR 卡住不审）。
+description: 为一个 GitHub 仓库搭建“多 agent 自主开发循环”（A2A devloop）：Claude 在 GitHub Actions 里按 issue 写代码、开 PR、按审核意见修复；GPT（本机 Codex CLI 或云端 codex-action）只读审核，可加 Claude 第二审核方；CI 测试合并后的代码并做浏览器冒烟验收；全部通过即自动合并，可选自动发布到 Cloudflare Pages（预览受 Access 保护、正式地址由用户开关公开）与自建匿名统计；卡住时打 needs-user 等人。用户说“搭一个 agent 互审自动合并的流程”“Claude 写 GPT 审”“A2A 开发循环”“devloop”“自动审核自动合码”“不想当 agent 之间的传话人”时使用。也用于“合并即发布”“预览和正式环境分开”“公开上线”“加匿名统计”，以及排查已搭好的 devloop（云端 Claude 秒退、CI 等不到、PR 卡住不审、发布失败）。
 ---
 
 # A2A devloop：Claude 写、GPT 审、自动合并
@@ -13,9 +13,37 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
    需修改 → 评论触发云端 Claude 修复同一分支 → 再审（≤5 轮）
    通过   → 在测试过的 base 上 git merge --no-ff，普通 push 到 main（main 变了即被拒）
 卡住    → needs-user 标签 + 失败说明，等人
+
+可选（云端模式）：审核方换成 gpt-review.yml（不需要用户电脑在线）
+   select → review：GPT(:read-only) + Claude(只读工具) 各审一次，任一方需修改即需修改
+          → decide：CI(合并后代码 + 浏览器冒烟) → 合并 → 触发 ci.yml deploy_main
+可选（发布）：main 更新 → pages.sh → Cloudflare Pages
+   预览 *.<项目>.pages.dev 始终受 Access 保护；正式地址 PAGES_PUBLIC=true 才公开；ANALYTICS=on 连同 D1 匿名统计一起发布
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test` 77 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test templates/scripts/devloop/*.test.mjs` 141 项）。搭建时复制过去，再按项目替换占位符。
+
+## 零、适用场景（先判断该不该用这套）
+
+“Claude 写 → 两个模型审 → CI 验收 → 自动合并 → 自动发布”把人从传话和点按钮里解放出来，代价是**合并与发布不再逐个经过人**。所以它适合“错了也便宜、能快速回滚”的项目。
+
+**适合**
+- 一个人或很小的团队，人只想提 issue、做决定，不想当 agent 之间的传话人。
+- 早期产品、原型、个人项目、小游戏、工具站、文档站：需求能拆成一件件独立 issue，并能写出可勾选的验收标准。
+- 测试与构建能在 GitHub 一次性 runner 上几分钟内完整跑完；核心路径能用浏览器冒烟测试自动验证。
+- 发布物是静态前端（可带少量 serverless 函数），出问题重新发布上一版即可回滚；内部预览和公开正式地址可以分开。
+- 能接受代码经过所选模型 API / 网关，能接受按用量计费的 AI 费用（单独记账、设上限）。
+
+**不适合（或只取其中一部分）**
+- 有状态的生产后端、数据库迁移、支付、真钱交易、受监管行业（医疗、金融等）：自动合并 + 自动发布的风险太高。至少关掉自动合并（只搭到 `--no-merge`）或不接发布模块，由人逐个放行。
+- 团队要求多人审批、分支保护、变更审计：本模板用普通 push 合并，不走 GitHub 的审批与合并按钮。
+- 测试薄弱、或核心验收离不开人（真机、硬件、原生 App 上架、主观的美术 / 手感评审）：模型互审只能审代码，替代不了验收。可以保留循环，但把合并留给人。
+- 大量改动 `.github/workflows/` 或基础设施的仓库：`GITHUB_TOKEN` 没有 workflows 权限，云端推不了、合不了，会频繁停在本地会话。
+- 构建很长、需要内网 / 私有网络资源、或代码不能离开公司环境（不能经过第三方模型网关）。
+- 多人同时频繁手动推 main：基准一直变，原子合并会反复 `retry`。
+- 面向中国大陆公众的正式上线：`*.pages.dev` 在大陆不稳定，需另配国内平台与 ICP 备案（发布模块要换，循环本身可用）。
+
+**按需取用**：循环（claude.yml + 审核 + CI）、云端双评审、浏览器冒烟、Pages 发布、匿名统计彼此独立，可以只装前面几层。
 
 ## 一、先和用户确认（这些是用户的决定，不要替他选）
 
@@ -28,7 +56,10 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 4. **轮次用满后怎么办**（仓库变量 `ROUND_LIMIT_MODE`，让用户二选一，默认 `needs-user`）：
    - `needs-user`：5 轮仍未通过就停下、加 `needs-user`，由用户裁决（见第五节）；
    - `auto`（免人工合码）：blocker 或意见数回升仍停下；意见数减少自动追加轮次（最多 3 轮）；持平或追加用完、无 blocker、CI 通过即合并，剩余意见逐条开 `devloop` issue。代价是会合并 GPT 仍认为有 major 问题的代码，靠后续 issue 修。
-5. **残余风险告知**：本机关机即停审；分支保护在私有仓库需付费套餐；云端执行代码的任务里有模型 key（建议设用量上限）；代码会经过所选模型网关。
+5. **审核放在哪里**：本机常驻（ChatGPT 订阅 + Codex CLI，电脑要在线）还是云端 `gpt-review.yml`（需 OpenAI API key，可加 Claude 第二审核方）；两者可并存（见三·五）。
+6. **发布与公开**：是否自动发布到 Cloudflare Pages；正式地址何时对公众开放（`PAGES_PUBLIC`）；是否开匿名统计（`ANALYTICS`）及保留期。这三项都只由用户拨开关。
+7. **费用口径**：AI 网关 / 模型 API 费用与现金预算（托管、域名等）分开记账；上限多少、按月还是总额由用户定。
+8. **残余风险告知**：本机关机即停审；分支保护在私有仓库需付费套餐；云端执行代码的任务里有模型 key（建议设用量上限）；代码会经过所选模型网关。
 
 ## 二、搭建步骤
 
@@ -60,6 +91,26 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 5. 安全结构：评审任务只读令牌、codex-action 以 `:read-only` 运行、讨论内容视为数据；发评论任务只有 `issues: write`、不跑模型；整次运行按 issue 串行（`queue: max`）；“已评审”只认 `github-actions[bot]` 发出且带 `<!-- gpt-discuss:review … -->` 标记的评论。
 6. 上线验证：合并后给一个已有讨论 issue 打上 `discussion`，确认只出现一条 GPT 评论、末尾带标记；再在评论里 `@gpt` 问一个具体问题，确认它回答的是那条。
 7. 这个工作流改的是 `.github/workflows/`，审核要求修改时云端 Claude 推不上来（见设计要点），由本地会话修复。
+
+## 二·六、可选：云端审核 + Claude 第二审核方
+
+适用：不想依赖用户电脑在线；希望两个不同模型都通过才合并。
+
+1. 复制 `templates/.github/workflows/gpt-review.yml`、`templates/scripts/devloop/{cloud,combine-review}.mjs` 及其测试。
+2. 凭据：`OPENAI_API_KEY`（网关时加变量 `GPT_RESPONSES_ENDPOINT`、`GPT_MODEL`）；`ANTHROPIC_API_KEY`（与 claude.yml 共用；第二审核方模型用变量 `CLAUDE_REVIEW_MODEL`，未设沿用 `CLAUDE_MODEL`）；`DEVLOOP_MARKER_KEY`（与本机审核方同一把）。
+3. 开关：`gh variable set CLOUD_REVIEW --body on`；`SECOND_REVIEW=off` 可关掉 Claude 那一方。先手动 `gh workflow run gpt-review.yml -f pr=<N>` 验证一次再开定时。
+4. 第二审核方只给 `Read,Glob,Grep`，diff 由工作流预先生成到只读目录；`--setting-sources user --strict-mcp-config` 不加载 PR 里的 `.claude/settings.json` 与 `.mcp.json`（否则 PR 可借钩子在持有 key 的环境里执行命令）。`combine-review.test.mjs` 读取真实 YAML 校验这些约束，升级 Claude Code 版本后要重新实测。
+5. 合并后 `decide` 用 `workflow_dispatch` 触发 `ci.yml -f deploy_main=true`（`GITHUB_TOKEN` 推 main 不触发 push 工作流）。
+
+## 二·七、可选：浏览器冒烟验收
+
+把 `templates/scripts/e2e/smoke.example.mjs` 按产品核心路径改写、改名为 `scripts/e2e/smoke.mjs`；`ci.yml` 检测到才运行，失败即不合并、不发布。项目加 `playwright` devDependency；非 Vite 项目设变量 `E2E_PREVIEW_CMD`。断言“结果变化”（数字、列表真的变了），基线在前置动作处理完之后再读。
+
+## 二·八、可选：发布、预览 / 正式分离、匿名统计
+
+照 `templates/docs/LAUNCH.md` 的配置清单逐步做，每步都有验证；匿名统计见 `templates/docs/ANALYTICS.md`，接收端与表结构在 `templates/functions/`（替换 `EVENTS` 白名单与日界时区）。
+仓库变量：`PAGES_PROJECT`（设了才运行发布与每日清理）、`PAGES_DEPLOY`、`PAGES_PUBLIC`、`ANALYTICS`、`RETENTION_DAYS`。**关功能改值，不删变量。**
+密钥只让用户自己 `gh secret set`；账户 ID、令牌值、数据库 ID 不写进仓库。
 
 ## 三、设计要点（每一条都是真实审核里被打回过的）
 
@@ -100,6 +151,10 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 - 内部验收环境要在“上传前”自证受保护：用未登录请求访问正式地址和一个预览地址，必须拿到**访问控制本身的确证**才放行，否则拒绝上传。以 Cloudflare Access 为例，只认 3xx 且 Location 严格匹配 `^https://<团队>.cloudflareaccess.com/cdn-cgi/access/login([/?]|$)`（协议、主机后缀、路径逐项校验，不能做子串匹配）；**普通 401/403 不算**——反机器人机制（如 Browser Integrity Check）也会对 CI 返回 403，而浏览器仍能直接访问。先配访问控制、再开上传开关；开关默认关闭。
 - Cloudflare Pages + Access（新版后台实测）：Pages 项目设置里启用 **Preview access** 会自动生成一个 Access 应用（只覆盖 `*.<项目>.pages.dev`，规则为“账户成员”）。**不开通 Zero Trust 套餐也能用**。保护正式地址：进入该应用 → Edit → Destinations 里**保留**通配符那行、再加一行子域留空的 `<项目>.pages.dev` → 保存（官方旧文档的“删通配符再重新启用”是旧界面做法）。之后用未登录请求验证两类地址都 302 到 `https://<团队>.cloudflareaccess.com/cdn-cgi/access/login/…`。注意：规则放行的是账户成员，以后邀请他人加入 Cloudflare 账户即获得访问权。
 - 上传开关打开后不必等下一次合并：重跑最近一次默认分支 CI 的发布任务即可（`gh run rerun <run> --job <job>`），前提是该提交仍是默认分支最新。发布后再次用未登录请求确认正式与本次预览地址都仍被拦截。
+
+- 公开开关独立于上传开关：`PAGES_PUBLIC` 未设时，只要正式地址的 Access 被撤掉，发布就拒绝上传，防止误公开；公开后预览地址仍保留 Access。
+- 匿名统计：D1 库由发布流程按名字精确查找、没有才创建，建表语句可重复执行；任何一步失败整体不上传。保留期清理放进独立的每日定时任务，与发布解耦；查不了 D1 时只有“变量从未设置”才允许跳过，所以关闭统计要设 `off` 而不是删变量。隐私说明里承诺的天数和脚本上限由测试绑定成同一个数。
+- 统计事件只在操作确认成功后上报；本机地址、调试入口（含 CI 冒烟）不上报。
 
 **让评审 agent 验收受保护的环境**
 - 用邮箱验证码登录的访问控制，评审 agent 通常过不去。不要为此放开访问：由本地会话在**同一提交**上本机试玩、按玩家路径截图，做成“体验包” issue（截图、操作路径、当时数值、现状缺口、评审请求），截图提交到不建 PR 的资料分支，用提交号固定的链接引用。
@@ -149,6 +204,12 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | 云端定时审核（`schedule`）几个小时都不触发，手动 `workflow_dispatch` 正常 | GitHub 定时任务不保证准时，新加的定时可能长时间不跑。不要只靠定时：发布修复后由 `publish` 用 `gh workflow run <审核工作流>` 主动触发（`GITHUB_TOKEN` 触发 `workflow_dispatch` 是允许的），定时只作兜底。 |
 | shell 脚本里 `$FILES` 列表只被当成一个参数（`git diff -- $FILES` 输出为空） | zsh 默认不对未加引号的变量分词。用数组，或在 `bash -c` 里执行。 |
 | 云端审核退回后自动触发的 Claude 修复立即失败：`Workflow initiated by non-human actor: github-actions (type: Bot)` | 由 `GITHUB_TOKEN` 发起的 `workflow_dispatch`，发起者是 github-actions 机器人，claude-code-action 默认拒绝。在 `claude.yml` 设 `allowed_bots: ${{ github.event_name == 'workflow_dispatch' && 'github-actions' \|\| '' }}`：只对手动触发放行，打标签、评论仍只认人类。不要用 `'*'`。 |
+| pages 任务失败：`查询 D1 数据库失败（令牌需要 Account → D1 → Edit 权限）` | 令牌只有 Pages 权限。到 Cloudflare **My Profile → API Tokens**（个人资料页的用户令牌，不在账户令牌页）编辑该令牌，加 Account → D1 → Edit，保存后重新打开确认两条权限都在（新版后台是勾选列表，容易没保存）。改权限不用 Roll。 |
+| 令牌 Roll 之后所有发布都 401 / 认证失败 | Roll 让旧值立即失效。把新值 `gh secret set CLOUDFLARE_API_TOKEN` 更新进去，之后不要再 Roll。 |
+| 想撤掉正式地址的 Access，Zero Trust → Access → Applications 页被 “Choose a plan” 挡住 | 不要点。从 Pages 项目 → Settings → Preview access → **Manage** 进入同一个 Access 应用 → Edit → Destinations，只删正式地址那一行、保留通配符预览那一行。 |
+| 撤掉 Access 后发布被拒：`未确认受 Cloudflare Access 保护` | 预期行为：没设 `PAGES_PUBLIC=true`。确认是用户的公开决定后再设。 |
+| pages 任务与每日清理整个被跳过 | 没设仓库变量 `PAGES_PROJECT`。 |
+| 云端审核任务启动即失败（如 runner 环境的权限冲突让 codex-action 起不来） | 记为基础设施问题，下一轮扫描自动重试同一提交；累计 3 次才加 `needs-user`。偶发的不用处理；连续 3 次看 review 任务日志。 |
 | `gh workflow run` 能触发但本地 `claude` 说未登录 | 桌面端 Claude 的登录不共享给命令行；本模板不依赖本机 claude。 |
 
 ## 五、轮次用满后的处理
@@ -171,4 +232,5 @@ PR 达到轮次上限被打 `needs-user` 时，把剩余问题按严重度和影
 ## 六、交付时告诉用户
 
 - 怎么用：给 issue 打 `devloop` 标签；PR 卡住看 `needs-user`；暂停某 PR 打 `hold`；停掉本机审核 `launchctl bootout gui/$(id -u)/<label>`；日志在 `<HOME_DIR>/watch.log`。
-- 仍归用户的决定：托管、收费 / 广告 / 公开上线、分支保护、给模型 key 设上限、首次运行后的实际费用。
+- 开关一览（都是仓库变量，改值不删变量）：`CLOUD_REVIEW`、`SECOND_REVIEW`、`ROUND_LIMIT_MODE`、`PAGES_DEPLOY`、`PAGES_PUBLIC`、`ANALYTICS`、`RETENTION_DAYS`。
+- 仍归用户的决定：托管、收费 / 广告 / 公开上线、分支保护、给模型 key 设上限、首次运行后的实际费用（AI 费用与现金预算分开记）。

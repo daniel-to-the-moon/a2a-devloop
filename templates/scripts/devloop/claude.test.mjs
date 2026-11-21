@@ -306,3 +306,9 @@ test('claude.yml：action 之前运行 install-bun.sh，并把它输出的路径
   assert.doesNotMatch(steps.slice(rootCheckout), /_devloop\//, '根目录检出之后不能再引用 _devloop');
   assert.match(yml, /path_to_bun_executable: \$\{\{ steps\.bun\.outputs\.path \}\}/);
 });
+
+test('claude.yml：只在手动触发（云端审核用 GITHUB_TOKEN 发起）时放行 github-actions 机器人', () => {
+  const yml = readFileSync(join(HERE, '../../.github/workflows/claude.yml'), 'utf8');
+  assert.match(yml, /\n {10}allowed_bots: \$\{\{ github\.event_name == 'workflow_dispatch' && 'github-actions' \|\| '' \}\}\n/);
+  assert.doesNotMatch(yml, /allowed_bots: ['"]?\*/);
+});
