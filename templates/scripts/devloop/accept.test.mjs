@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { acceptanceState, isAwaiting, isInFlight, isVisual, loadGates, queueBlocker, reportPlan, visualRounds, VISUAL_PREFIX } from './accept.mjs';
+import { acceptanceGate, acceptanceState, followUpsAccept, isAwaiting, isInFlight, isVisual, loadGates, queueBlocker, reportPlan, visualRounds, VISUAL_PREFIX } from './accept.mjs';
 import { buildParts, canaryOk, canaryPng, judge, loadShots, outputText, parseVerdict, run, toRequest } from './visual-judge.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -83,7 +83,9 @@ test('视觉评分结论：通过 → 等用户；未达标 → 交 Claude 修�
   const err = reportPlan({ ...base, rounds: 0, judge: { verdict: 'error', reason: '多模态自检失败' } });
   assert.equal(err.action, 'await');
   assert.match(err.body, /没有完成（多模态自检失败）/);
-  assert.equal(visualRounds([{ body: fix.body }, { body: pass.body }, { body: '执行者：GPT\n结论：未达标' }]), 1);
+  const bot = 'github-actions[bot]';
+  assert.equal(visualRounds([{ author: bot, body: fix.body }, { author: bot, body: pass.body }, { author: bot, body: '执行者：GPT\n结论：未达标' }]), 1);
+  assert.equal(visualRounds([{ author: 'someone', body: fix.body }, { author: '', body: fix.body }]), 0, '别人仿写的验收报告不计轮次');
 });
 
 test('评分解析与门槛', { skip }, () => {
@@ -135,6 +137,15 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   const nomodel = await run({ shotsDir: '/d', stylePath: '/style', env: { OPENAI_API_KEY: 'k' }, cfg: { ...cfg, model: '' }, fs, fetchImpl: g.fetchImpl });
   assert.match(nomodel.reason, /没有配置评分模型/);
   assert.equal((await run({ provider: 'x', shotsDir: '/d', stylePath: '/style', env, cfg, fs })).verdict, 'error');
+  // 必需截图缺一张就报错（不能缺图还通过）；可选截图有就一起评
+  const miss = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, shots: ['shot-home.png', 'shot-interact.png'] }, fs, fetchImpl: g.fetchImpl });
+  assert.equal(miss.verdict, 'error');
+  assert.match(miss.reason, /缺少必需截图：shot-interact\.png/);
+  const fsOpt = { ...fs, existsSync: (f) => ['/d', '/d/shot-home.png', '/d/shot-detail.png'].includes(f) };
+  const opt = rig('openai', [CANARY, SCORE]);
+  const ro = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, optionalShots: ['shot-detail.png', 'shot-other.png'] }, fs: fsOpt, fetchImpl: opt.fetchImpl });
+  assert.equal(ro.verdict, 'pass', JSON.stringify(ro));
+  assert.deepEqual(ro.shots, ['shot-home.png', 'shot-detail.png']);
   assert.ok(canaryOk('```json\n{"tl":"Red","tr":"green","bl":"blue","br":"yellow"}\n```'));
   assert.equal(outputText('openai', { output: [{ content: [{ type: 'reasoning' }, { type: 'output_text', text: 'x' }] }] }), 'x');
   // 提示词声明图中文字是数据
@@ -170,4 +181,41 @@ test('ci.yml：性能验收与截图在冒烟之后运行，devloop 触发时上
   const y = yml('ci.yml');
   assert.match(y, /node scripts\/e2e\/gates\.mjs/);
   assert.match(y, /name: dist-pr\$\{\{ inputs\.pr \}\}-\$\{\{ inputs\.head \}\}/);
+});
+
+test('合并前把关 acceptanceGate：只拦“要合并、改画面、当前 head 没确认”的 PR；先建标签再等用户', () => {
+  const g = { visual: { paths: ['src/client/'], waitLabel: 'awaiting-acceptance', acceptLabel: 'accepted' } };
+  const merge = { state: 'merged', merge: true, text: 'ok' };
+  const calls = [];
+  const ghR = (a) => calls.push(a.join(' '));
+  const base = { pr: 7, head: 'h1', markers: [], gates: g, ghR, runUrl: 'https://github.com/o/r/actions/runs/123' };
+  // 不改画面 / 没装模块 / 本来就不合并：原样放行
+  assert.equal(acceptanceGate({ ...base, d: merge, files: ['README.md'], acceptance: () => 'none' }).d, merge);
+  assert.equal(acceptanceGate({ ...base, d: merge, files: ['src/client/a.ts'], gates: null, acceptance: () => 'none' }).d, merge);
+  const changes = { state: 'changes', merge: false };
+  assert.equal(acceptanceGate({ ...base, d: changes, files: ['src/client/a.ts'], acceptance: () => 'none' }).d, changes);
+  // 已确认当前 head：放行合并
+  assert.equal(acceptanceGate({ ...base, d: merge, files: ['src/client/a.ts'], acceptance: () => 'accepted' }).d, merge);
+  // 没确认：不合并，先建两个标签，再等用户，触发 accept.yml
+  const r = acceptanceGate({ ...base, d: merge, files: ['src/client/a.ts'], acceptance: () => 'none' });
+  assert.deepEqual([r.d.state, r.d.reason, r.d.merge, r.d.addLabel], ['retry', 'accept', false, 'awaiting-acceptance']);
+  assert.deepEqual(r.accept, { head: 'h1', run: '123' });
+  assert.ok(calls[0].startsWith('label create awaiting-acceptance') && calls[1].startsWith('label create accepted'));
+  assert.deepEqual(followUpsAccept(7, r.accept), [['workflow', 'run', 'accept.yml', '--ref', 'main', '-f', 'pr=7', '-f', 'head=h1', '-f', 'run=123']]);
+  // 确认已失效：摘掉旧 accepted；拿不到运行号就不触发，并在评论里说明
+  calls.length = 0;
+  const s = acceptanceGate({ ...base, d: merge, files: ['src/client/a.ts'], runUrl: null, acceptance: () => 'stale' });
+  assert.ok(calls.includes('pr edit 7 --remove-label accepted'));
+  assert.equal(s.accept, null);
+  assert.match(s.d.text, /已失效/);
+  assert.match(s.d.text, /拿不到 CI 运行号/);
+});
+
+test('本机与云端两个合并入口都走 acceptanceGate（本机兜底改工作流的 PR、云端审核关闭时也绕不过验收）', () => {
+  for (const f of ['devloop.mjs', 'cloud.mjs']) {
+    const src = readFileSync(join(HERE, f), 'utf8');
+    const gate = src.indexOf('acceptanceGate({');
+    const mergeAt = src.indexOf('if (d.merge) {');
+    assert.ok(gate > 0 && mergeAt > gate, `${f}：合并前先过 acceptanceGate`);
+  }
 });

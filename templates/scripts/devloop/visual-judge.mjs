@@ -164,12 +164,15 @@ export function pickModel(provider, { model, env, cfg }) {
 
 export async function run({ provider = 'openai', model: modelArg, shotsDir, baselineDir, referencePath, stylePath, title, env, cfg, fetchImpl = fetch, fs = { existsSync, statSync, readFileSync } }) {
   if (!PROVIDERS.includes(provider)) return { verdict: 'error', reason: `未知的评分服务：${provider}`, provider };
-  const shots = loadShots(shotsDir, cfg.shots, cfg.maxBytes, fs);
+  // shots：必需截图，缺一张就不评（不能让缺图的 PR 拿到“通过”）；optionalShots：有就一起评（例如以后才产出的特写）
+  const wanted = [...cfg.shots, ...(cfg.optionalShots ?? [])];
+  const shots = loadShots(shotsDir, wanted, cfg.maxBytes, fs);
   const model = pickModel(provider, { model: modelArg, env, cfg });
   const names = { provider, model, shots: shots.map((s) => s.name) };
-  if (!shots.length) return { verdict: 'error', reason: '没有可评的截图', ...names };
+  const missing = cfg.shots.filter((n) => !shots.some((s) => s.name === n));
+  if (missing.length) return { verdict: 'error', reason: `缺少必需截图：${missing.join('、')}（不存在、不是 PNG 或超过大小上限）`, ...names };
   if (!model) return { verdict: 'error', reason: '没有配置评分模型（仓库变量 VISUAL_MODEL，或 openai 时的 GPT_MODEL）', ...names };
-  const baseline = loadShots(baselineDir, cfg.shots, cfg.maxBytes, fs);
+  const baseline = loadShots(baselineDir, wanted, cfg.maxBytes, fs);
   const reference = loadPng(referencePath, cfg.maxBytes, fs);
   names.baseline = baseline.map((s) => s.name);
   names.reference = Boolean(reference);

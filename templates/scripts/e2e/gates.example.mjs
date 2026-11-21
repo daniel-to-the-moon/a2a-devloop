@@ -44,12 +44,17 @@ function hookGl() {
     wrap(p, 'drawRangeElements', (a) => prim(a[0], a[3]));
   }
   const raf = window.requestAnimationFrame.bind(window);
+  // 同一浏览器帧里的多个回调拿到同一时间戳：时间戳变了才结算上一帧，多回调的 draw call 合计到同一帧
   let last = 0;
+  let curT = -1;
   window.requestAnimationFrame = (cb) => raf((t) => {
-    if (cur.calls > 0) frames.push({ ...cur, ms: last ? t - last : 0 });
-    if (frames.length > 600) frames.shift();
-    last = t;
-    cur = { calls: 0, tris: 0 };
+    if (t !== curT) {
+      if (cur.calls > 0) frames.push({ ...cur, ms: last ? curT - last : 0 });
+      if (frames.length > 600) frames.shift();
+      if (curT >= 0) last = curT;
+      curT = t;
+      cur = { calls: 0, tris: 0 };
+    }
     cb(t);
   });
   window.__gates = { take: () => frames.splice(0, frames.length) };

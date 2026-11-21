@@ -4,7 +4,8 @@
  *
  * - 合并排期：isInFlight / queueBlocker —— 改同一文件的 PR 按编号排队，前面的合完后面的再审（避免互相冲突、反复返工）。
  * - 发布把关：isVisual / acceptanceState —— 改画面的 PR 在代码审核与 CI 都通过后，先发预览、跑视觉评分，等用户加 accepted 标签才合并。
- *   accepted 必须由仓库所有者打、且晚于当前 head 的提交时间（之后有新提交就要重新确认）。
+ *   accepted 必须由仓库所有者打、且晚于针对当前 head 的“等待验收”签名标记（换了 head 就要重新确认）。
+ *   acceptanceGate 是云端与本机共用的合并前置条件。
  * - 视觉验收结果：reportPlan —— 根据评分结论决定：等用户确认 / 交 Claude 修 / 停下等用户。
  *
  *   node accept.mjs report --pr N --head H --judge judge.json --preview URL --run-url URL   （accept.yml report 任务：发评论、改标签、需要时触发修复）
@@ -15,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eligible, hasSkipLabel } from './policy.mjs';
+import { CLOUD_REVIEWER_LOGINS } from './review-format.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 /** gates.json 不存在 → null（验收与排期模块未安装，云端审核照旧） */
@@ -62,7 +64,52 @@ export function acceptanceState({ events, owner, label, markers, head }) {
 }
 
 /** 已有几轮视觉验收未达标（以评论计） */
-export const visualRounds = (comments) => comments.filter((c) => c.body.startsWith(VISUAL_PREFIX) && c.body.includes('结论：未达标')).length;
+/** 已有几轮视觉验收未达标：只数云端身份（github-actions）发的报告，别人仿写同样开头的评论不算，免得被人耗光修复轮次 */
+export const visualRounds = (comments) => comments.filter((c) => CLOUD_REVIEWER_LOGINS.includes(c.author) && c.body.startsWith(VISUAL_PREFIX) && c.body.includes('结论：未达标')).length;
+
+export const runIdOf = (url) => /\/actions\/runs\/(\d+)/.exec(url ?? '')?.[1] ?? null;
+
+/** 验收用到的两个标签：[名称, 颜色, 说明] */
+export const acceptLabels = (visual) => [
+  [visual.waitLabel, 'FBCA04', '等用户视觉验收（看预览后加 accepted）'],
+  [visual.acceptLabel, '0E8A16', '用户已确认画面，可以合并'],
+];
+
+/**
+ * 合并前的发布把关，云端（cloud.mjs）与本机（devloop.mjs）共用同一个前置条件，任何入口都绕不过。
+ * d：policy.decide 的结果；只在 d.merge 且改了画面、且用户没确认当前 head 时介入：
+ * 改为 retry:accept（不合并），确保标签存在并加等待标签由调用方按 d.addLabel 处理，返回需要触发的 accept.yml 参数。
+ * acceptance(pr, head, markers) → acceptanceState 的结果。返回 { d, accept: { head, run } | null }
+ */
+export function acceptanceGate({ d, pr, head, files, markers, gates, acceptance, ghR, runUrl }) {
+  if (!d.merge || !gates || !isVisual(files, gates.visual)) return { d, accept: null };
+  const acc = acceptance(pr, head, markers);
+  if (acc === 'accepted') return { d, accept: null };
+  // 标签不存在时 gh pr edit --add-label 会失败：先确保两个标签都在（--force 已存在则只更新）
+  for (const [name, color, desc] of acceptLabels(gates.visual)) {
+    try { ghR(['label', 'create', name, '--color', color, '--description', desc, '--force']); } catch { /* 尽力；随后加标签失败会让本次运行失败 */ }
+  }
+  if (acc === 'stale') { try { ghR(['pr', 'edit', String(pr), '--remove-label', gates.visual.acceptLabel]); } catch { /* 尽力 */ } }
+  const nd = {
+    state: 'retry', reason: 'accept', merge: false, addLabel: gates.visual.waitLabel,
+    text: `审核通过 + 合并后代码测试通过。本 PR 改动画面，合并前需要视觉验收${acc === 'stale' ? '（之前的 accepted 不对应最新提交，已失效）' : ''}：正在发布预览并评分，结果会另发一条评论；用户加 \`${gates.visual.acceptLabel}\` 标签后下一轮合并。`,
+  };
+  const run = runIdOf(runUrl);
+  if (!run) nd.text += '\n\n（拿不到 CI 运行号，未能触发预览；可手动运行 accept.yml。）';
+  return { d: nd, accept: run ? { head, run } : null };
+}
+
+/** 需要触发的 accept.yml（gh 参数列表，不含 -R） */
+export const followUpsAccept = (pr, accept) => (accept ? [['workflow', 'run', 'accept.yml', '--ref', 'main', '-f', `pr=${pr}`, '-f', `head=${accept.head}`, '-f', `run=${accept.run}`]] : []);
+
+/** acceptance(pr, head, markers)：读 PR 的标签事件，按 acceptanceState 判定。owner：唯一能确认的账号（仓库所有者） */
+export const ownerAcceptance = ({ gh, repo, owner, label }) => (p, h, markers) => acceptanceState({
+  events: JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${repo}/issues/${p}/events?per_page=100`])).flat(),
+  owner,
+  label,
+  markers,
+  head: h,
+});
 
 /**
  * 根据评分结论决定下一步与评论内容。
@@ -111,7 +158,7 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
     console.log(`跳过：PR 已关闭或有新提交（${String(now.headRefOid).slice(0, 8)}）`);
     process.exit(0);
   }
-  const plan = reportPlan({ pr, head, judge, preview: arg('preview') || '', runUrl: arg('run-url'), rounds: visualRounds(now.comments.map((c) => ({ body: c.body }))), maxRounds: gates.judge.maxRounds, visual: gates.visual });
+  const plan = reportPlan({ pr, head, judge, preview: arg('preview') || '', runUrl: arg('run-url'), rounds: visualRounds(now.comments.map((c) => ({ author: c.author?.login ?? '', body: c.body }))), maxRounds: gates.judge.maxRounds, visual: gates.visual });
   const f = join(mkdtempSync(join(tmpdir(), 'accept-')), 'c.md');
   writeFileSync(f, plan.body);
   gh(['pr', 'comment', String(pr), '--body-file', f]);

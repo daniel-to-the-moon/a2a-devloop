@@ -21,7 +21,7 @@ import { decide, eligible, hasTerminal, lastFindings, limitMode, roundsUsed, sho
 import { createPrState } from './prstate.mjs';
 import { ensureFollowUps, followUpItems } from './followups.mjs';
 import { buildReviewPrompt, formatReview, touchesWorkflows, validateReview } from './review-format.mjs';
-import { acceptanceState, isInFlight, isVisual, loadGates, queueBlocker } from './accept.mjs';
+import { acceptanceGate, followUpsAccept, isInFlight, loadGates, ownerAcceptance, queueBlocker, runIdOf } from './accept.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts }).trim();
@@ -49,13 +49,13 @@ export function pickPr(states, gates = null) {
 }
 
 /** 从 Actions 运行地址取运行号 */
-export const runIdOf = (url) => /\/actions\/runs\/(\d+)/.exec(url ?? '')?.[1] ?? null;
+export { runIdOf };
 
 /** 合并后的后续：需修改 → 直接触发云端 Claude 修复（GITHUB_TOKEN 发的评论不会触发 issue_comment 工作流）；合并 → 触发部署 */
 export function followUps(state, pr, accept = null) {
   if (state === 'changes') return [['workflow', 'run', 'claude.yml', '-f', `pr=${pr}`]];
   // 改画面的 PR 审核与测试都通过：发预览 + 视觉评分（accept.yml），等用户确认
-  if (state === 'retry' && accept) return [['workflow', 'run', 'accept.yml', '--ref', 'main', '-f', `pr=${pr}`, '-f', `head=${accept.head}`, '-f', `run=${accept.run}`]];
+  if (state === 'retry' && accept) return followUpsAccept(pr, accept);
   if (state === 'merged') return [['workflow', 'run', 'ci.yml', '--ref', 'main', '-f', 'deploy_main=true']];
   return [];
 }
@@ -182,25 +182,9 @@ export async function runDecide({ pr, head, base, reviewResult, reviewPath, meta
     mode: limitMode(io.limitMode),
     prevFindings: lastFindings(now.markers),
   });
-  // 发布把关（gates.json）：改画面的 PR 合并前要用户确认。没确认 → 不合并，记 retry:accept，触发预览与视觉评分
+  // 发布把关（gates.json）：改画面的 PR 合并前要用户确认（accept.mjs acceptanceGate，本机 devloop.mjs 用同一个）
   let accept = null;
-  if (d.merge && io.gates && isVisual(now.files, io.gates.visual)) {
-    const acc = io.acceptance(pr, head, now.markers);
-    if (acc !== 'accepted') {
-      const run = runIdOf(ci.url);
-      // 标签不存在时 gh pr edit --add-label 会失败：先确保两个标签都在（--force 已存在则只更新）
-      for (const [name, color, desc] of [[io.gates.visual.waitLabel, 'FBCA04', '等用户视觉验收（看预览后加 accepted）'], [io.gates.visual.acceptLabel, '0E8A16', '用户已确认画面，可以合并']]) {
-        try { io.ghR(['label', 'create', name, '--color', color, '--description', desc, '--force']); } catch { /* 尽力；随后加标签失败会让本次运行失败 */ }
-      }
-      if (acc === 'stale') { try { io.ghR(['pr', 'edit', String(pr), '--remove-label', io.gates.visual.acceptLabel]); } catch { /* 尽力 */ } }
-      d = {
-        state: 'retry', reason: 'accept', merge: false, addLabel: io.gates.visual.waitLabel,
-        text: `审核通过 + 合并后代码测试通过。本 PR 改动画面，合并前需要视觉验收${acc === 'stale' ? '（之前的 accepted 早于最新提交，已失效）' : ''}：正在发布预览并评分，结果会另发一条评论；用户加 \`${io.gates.visual.acceptLabel}\` 标签后下一轮合并。`,
-      };
-      if (run) accept = { head, run };
-      else d.text += '\n\n（拿不到 CI 运行号，未能触发预览；可手动运行 accept.yml。）';
-    }
-  }
+  ({ d, accept } = acceptanceGate({ d, pr, head, files: now.files, markers: now.markers, gates: io.gates, acceptance: io.acceptance, ghR: io.ghR, runUrl: ci.url }));
   if (d.addLabel) io.ghR(['pr', 'edit', String(pr), '--add-label', d.addLabel]);
   if (d.merge) {
     try {
@@ -305,13 +289,7 @@ async function main() {
         mainSha,
         gates: loadGates(),
         // accepted 标签：最后一次由仓库所有者打上、且晚于当前 head 的“等待验收”标记才算数（accept.mjs acceptanceState）
-        acceptance: (p, h, markers) => acceptanceState({
-          events: JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${REPO}/issues/${p}/events?per_page=100`])).flat(),
-          owner: trustedReviewer(process.env),
-          label: loadGates().visual.acceptLabel,
-          markers,
-          head: h,
-        }),
+        acceptance: ownerAcceptance({ gh, repo: REPO, owner: trustedReviewer(process.env), label: loadGates()?.visual.acceptLabel }),
         runCi: (p) => runCi({ ...p, io: ciIo, timeoutMs: 30 * 60_000 }),
         fetch: (pr) => sh('git', ['fetch', '-q', 'origin', 'main', `pull/${pr}/head`]),
         mergeAndPush: (opts) => mergeAndPush({ repoDir: process.cwd(), home: mkdtempSync(join(tmpdir(), 'cloud-merge-')), ...opts }),

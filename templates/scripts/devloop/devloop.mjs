@@ -22,6 +22,7 @@ import { runCi } from './ci.mjs';
 import { acquireLock, mergeAndPush, reviewCacheKey, uniqueDir, withWorktree } from './gitops.mjs';
 import { decide, eligible, hasTerminal, lastFindings, limitMode, roundsUsed, shouldReview } from './policy.mjs';
 import { createPrState } from './prstate.mjs';
+import { acceptanceGate, followUpsAccept, isAwaiting, loadGates, ownerAcceptance } from './accept.mjs';
 import { drainPending, followUpItems } from './followups.mjs';
 import { buildReviewPrompt, formatReview, touchesWorkflows, validateReview } from './review-format.mjs';
 
@@ -152,7 +153,7 @@ async function reviewLocked(pr, { merge }) {
     return { pr, skipped: 'already decided' };
   }
   git(['fetch', '-q', 'origin', 'main']);
-  const d = decide({
+  let d = decide({
     ci,
     review: rv,
     now: { labels: now.labels, base: git(['rev-parse', 'origin/main']), mergeable: now.mergeable, state: now.state, isDraft: now.isDraft, baseRefName: now.baseRefName },
@@ -162,6 +163,14 @@ async function reviewLocked(pr, { merge }) {
     mode: roundLimitMode(),
     prevFindings: lastFindings(now.markers),
   });
+  // 发布把关：与云端同一个前置条件（accept.mjs acceptanceGate）。本机兜底改工作流的 PR、或云端审核关闭时，改画面的 PR 同样要预览 + 用户确认
+  const gates = loadGates();
+  const gated = acceptanceGate({
+    d, pr, head, files: now.files, markers: now.markers, gates, runUrl: ci.url,
+    acceptance: gates && ownerAcceptance({ gh: (args) => sh('gh', args), repo: REPO, owner: REPO.split('/')[0], label: gates.visual.acceptLabel }),
+    ghR: gh,
+  });
+  d = gated.d;
   if (d.addLabel) gh(['pr', 'edit', String(pr), '--add-label', d.addLabel]);
   if (d.merge) {
     try {
@@ -195,6 +204,10 @@ async function reviewLocked(pr, { merge }) {
   } catch (e) {
     if (d.state !== 'merged') throw e;
     log(`#${pr} 已合并，但审核评论发送失败：${e.message.split('\n')[0]}`);
+  }
+  // 评论（含 retry:accept 签名标记）发出后再触发预览与视觉评分：accept.yml 的结果以这条标记为准
+  for (const a of followUpsAccept(pr, gated.accept)) {
+    try { gh(a); } catch (e) { log(`#${pr} 触发预览与视觉验收失败：${e.message.split('\n')[0]}`); }
   }
   await processPending({ locked: true });
   const result = { pr, head, state: d.state, ci: ci.status, verdict: rv?.verdict ?? 'error', findings: rv?.findings.length ?? 0 };
@@ -256,6 +269,9 @@ async function watch(intervalSec) {
       for (const { number } of prs.sort((a, b) => a.number - b.number)) {
         const m = prState(number);
         if (!shouldReview({ head: m.headRefOid, labels: m.labels, markers: m.markers, pr: m })) continue;
+        // 当前 head 正在等用户视觉验收：不再审（省审核费用），用户加 accepted 或推新提交后再处理
+        const gates = loadGates();
+        if (gates && isAwaiting(m, gates.visual)) continue;
         // 云端审核开启（仓库变量 CLOUD_REVIEW=on）后，本机只兜底改动工作流文件的 PR（云端令牌无 workflows 权限合并不了）
         if (cloudReviewOn() && !touchesWorkflows(m.files)) continue;
         try {

@@ -21,7 +21,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
    预览 *.<项目>.pages.dev 始终受 Access 保护；正式地址 PAGES_PUBLIC=true 才公开；ANALYTICS=on 连同 D1 匿名统计一起发布
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test templates/scripts/devloop/*.test.mjs` 159 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test templates/scripts/devloop/*.test.mjs` 162 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 零、适用场景（先判断该不该用这套）
 
@@ -126,7 +126,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 | 真机试玩 | `.github/ISSUE_TEMPLATE/playtest.md` | 用户每个里程碑在自己手机上玩一次；设备模拟截图不是真机，云真机服务要付费，问用户 |
 
 1. 复制上表文件与 `accept.test.mjs`、`perf-gate.test.mjs`；没有 `gates.json` 时云端审核照旧（不启用把关与排期）。
-2. 按项目改：`gates.json` 的 `visual.paths`（真正影响画面的路径）与 `judge.shots`；`gates.mjs` 里标“按项目改”的画布选择器、关弹窗、第二个场景的操作；`STYLE.md` 写具体色值与风格。先在 main 上跑一次 `gates.mjs` 记基线，预算设为基线 ×1.2–1.3。
+2. 按项目改：`gates.json` 的 `visual.paths`（真正影响画面的路径）与 `judge.shots`（必需截图，缺一张评分即报错）/ `judge.optionalShots`（有就一起评）；`gates.mjs` 里标“按项目改”的画布选择器、关弹窗、第二个场景的操作；`STYLE.md` 写具体色值与风格。先在 main 上跑一次 `gates.mjs` 记基线，预算设为基线 ×1.2–1.3。
 3. **评分方由用户定，默认不让写代码的模型自评**：仓库变量 `VISUAL_PROVIDER`（`openai` 默认 / `anthropic`）+ `VISUAL_MODEL`（openai 时缺省用 `GPT_MODEL`）。想比较候选模型时，手动 `gh workflow run accept.yml -f pr=<N> -f head=<SHA> -f run=<CI 运行号> -f provider=<…> -f model=<…> -f report=false` 各跑一次，把结果匿名给用户打分，这是一次性的试验，不要写进流程。
 4. 标签由 `accept.yml` 自动创建（`awaiting-acceptance`、`accepted`）。
 5. 这些改动都在 `.github/workflows/`，云端审核合不了，由本机审核方或用户合并。
