@@ -158,11 +158,20 @@ export function judge({ scores, notes }, { minEach, minOverall }) {
   return { verdict: pass ? 'pass' : 'fail', scores, overall, notes, reason };
 }
 
+// fetch 的网络错误只有一句 “fetch failed”，真正原因在 cause 里（DNS、拒绝连接、证书、超时）
+export function netReason(e) {
+  if (e?.name === 'TimeoutError') return '超时';
+  const c = e?.cause;
+  const code = c?.code || c?.errors?.[0]?.code;
+  const msg = c?.message || e?.message || String(e);
+  return code && !msg.includes(code) ? `${code} ${msg}` : msg;
+}
+
 export function pickModel(provider, { model, env, cfg }) {
   return model || env.VISUAL_MODEL || (provider === 'openai' ? env.GPT_MODEL : '') || cfg.model || '';
 }
 
-export async function run({ provider = 'openai', model: modelArg, shotsDir, baselineDir, referencePath, stylePath, title, env, cfg, fetchImpl = fetch, fs = { existsSync, statSync, readFileSync } }) {
+export async function run({ provider = 'openai', model: modelArg, shotsDir, baselineDir, referencePath, stylePath, title, env, cfg, fetchImpl = fetch, fs = { existsSync, statSync, readFileSync }, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   if (!PROVIDERS.includes(provider)) return { verdict: 'error', reason: `未知的评分服务：${provider}`, provider };
   // shots：必需截图，缺一张就不评（不能让缺图的 PR 拿到“通过”）；optionalShots：有就一起评（例如以后才产出的特写）
   const wanted = [...cfg.shots, ...(cfg.optionalShots ?? [])];
@@ -177,12 +186,30 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
   names.baseline = baseline.map((s) => s.name);
   names.reference = Boolean(reference);
   const { url, headers } = endpoint(provider, env);
-  const call = async (payload) => {
-    const r = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload) });
+  // 网络错误、超时、429 与 5xx 视为暂时故障，退避重试（2026-11-21 #73：网关一时不可用，只得到一句 “fetch failed”）
+  const attempts = cfg.retries ?? 3;
+  const once = async (payload) => {
+    let r;
+    try {
+      r = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(cfg.timeoutMs ?? 300000) });
+    } catch (e) {
+      throw Object.assign(new Error(`连不上评分服务 ${new URL(url).host}：${netReason(e)}`), { transient: true });
+    }
     const body = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(`模型调用失败 HTTP ${r.status}：${JSON.stringify(body?.error ?? body).slice(0, 300)}`);
+    if (!r.ok) throw Object.assign(new Error(`模型调用失败 HTTP ${r.status}：${JSON.stringify(body?.error ?? body).slice(0, 300)}`), { transient: r.status === 429 || r.status >= 500 });
     if (body.stop_reason === 'refusal') throw new Error('模型拒绝回答');
     return body;
+  };
+  const call = async (payload) => {
+    for (let i = 1; ; i++) {
+      try {
+        return await once(payload);
+      } catch (e) {
+        if (!e.transient || i >= attempts) throw i > 1 ? new Error(`${e.message}（已重试 ${i} 次）`) : e;
+        console.error(`第 ${i} 次调用失败，稍后重试：${e.message}`);
+        await sleep((cfg.retryDelayMs ?? 15000) * i);
+      }
+    }
   };
   try {
     const c = await call(toRequest(provider, { model, parts: canaryParts(), system: '' }));

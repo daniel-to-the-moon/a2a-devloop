@@ -94,8 +94,9 @@ jobs:
   judge:
     needs: check
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 与 gpt-review.yml 审核任务同一镜像（26.04 上 2026-11-21 首次评分连不上网关，未查明前先固定）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
@@ -141,6 +142,8 @@ jobs:
           GPT_RESPONSES_ENDPOINT: ${{ vars.GPT_RESPONSES_ENDPOINT }}
           ANTHROPIC_API_KEY: ${{ (inputs.provider || vars.VISUAL_PROVIDER || 'openai') == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}
           ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+          # 网关证书若只在系统证书库里，Node 自带的根证书会拒绝连接；一并信任系统证书库
+          NODE_OPTIONS: --use-system-ca
         run: |
           set -euo pipefail
           title=$(gh pr view "$PR" -R "$REPO" --json title -q .title)

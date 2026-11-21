@@ -100,11 +100,16 @@ jobs:
         run: |
           set -euo pipefail
           C="$RUNNER_TEMP/codex-ctx"
+          # 只取需要的字段（--json）：不带 --json 的 gh pr view 会查 statusCheckRollup，本任务没有 checks/statuses 读权限，
+          # 报 “Resource not accessible by integration”（2026-11-21 PR #73 修复模式实测）
+          md='"# \(.title)\n\n\(.body // "")"'
+          cm='.comments[] | "## \(.author.login) \(.createdAt)\n\n\(.body)\n"'
           if [ "$MODE" = "fix" ]; then
-            gh pr view "$N" -R "$REPO" > "$C/task.md"
-            gh pr view "$N" -R "$REPO" --comments > "$C/comments.md"
+            gh pr view "$N" -R "$REPO" --json title,body,headRefName -q "$md" > "$C/task.md"
+            gh pr view "$N" -R "$REPO" --json comments -q "$cm" > "$C/comments.md"
           else
-            gh issue view "$N" -R "$REPO" --comments > "$C/task.md"
+            { gh issue view "$N" -R "$REPO" --json title,body -q "$md"; echo; echo '# 评论'; echo
+              gh issue view "$N" -R "$REPO" --json comments -q "$cm"; } > "$C/task.md"
           fi
       - name: 写提示词
         env:

@@ -136,11 +136,11 @@ jobs:
               改了 scripts/devloop 时 `node --test scripts/devloop/*.test.mjs`；纯文档改动不需要 npm。不通过就继续修，不要提交失败的代码。
             - 不要合并、不要审核自己的改动。
 
-            implement 模式：用 `gh issue view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --comments` 读 issue。
+            implement 模式：用 `gh issue view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --json title,body,comments` 读 issue（只用 --json，不带 --json 的 gh view 会查本任务无权读的字段而报错）。
               命中 docs/DEVLOOP.md 第五节任一停止条件或信息不足 → outcome 写 needs-user，body.md 写原因，不改代码。
               否则实现需求并为新增或改动的逻辑写测试，本地 commit；body.md 写明改了什么、怎么验证、哪些是提案值，末尾 `Closes #${{ github.event.issue.number || inputs.pr || inputs.issue }}`。
 
-            fix 模式：用 `gh pr view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --comments` 读 PR，以最新一条“执行者：GPT”评论为准；
+            fix 模式：用 `gh pr view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --json title,body,headRefName,comments` 读 PR（不带 --json 会查 statusCheckRollup，本任务无权读），以最新一条“执行者：GPT”评论为准；
               若最新的是“执行者：devloop（视觉验收）”且结论为未达标，就按其中的评分意见改画面（截图在评论里 Actions 链接的产物中，
               风格目标见 docs/visual/STYLE.md），仍遵守项目的素材规则与性能预算（scripts/e2e/budgets.json）。
               逐条处理 blocker 与 major；minor 合理就改；不同意的给出依据，不要静默忽略。

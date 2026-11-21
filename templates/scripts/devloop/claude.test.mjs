@@ -341,6 +341,15 @@ test('ctx / publish：GPT 执行者（PREFIX=codex）只动 codex/* 分支，按
   assert.match(r.stderr, /拒绝推送到非 codex\/\* 分支/);
 });
 
+test('codex.yml / claude.yml：读 issue 与 PR 只用 gh … --json（不带 --json 会查只读令牌无权读的 statusCheckRollup）', () => {
+  for (const f of ['codex.yml', 'claude.yml']) {
+    const yml = readFileSync(join(HERE, `../../.github/workflows/${f}`), 'utf8');
+    const views = yml.split('\n').filter((l) => /gh (pr|issue) view/.test(l) && !l.trim().startsWith('#'));
+    assert.ok(views.length >= 2, f);
+    for (const l of views) assert.match(l, /--json/, `${f}: ${l.trim()}`);
+  }
+});
+
 test('codex.yml：执行代码的任务只读、Codex 用 :workspace（无网络）且依赖先装好、固定 runner 镜像；发布任务不运行模型', () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/codex.yml'), 'utf8');
   const work = yml.slice(yml.indexOf('\n  work:'), yml.indexOf('\n  publish:'));

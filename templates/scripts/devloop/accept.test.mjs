@@ -132,8 +132,26 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   assert.equal(rb.verdict, 'error');
   assert.match(rb.reason, /多模态自检失败/);
   assert.equal(blind.calls.length, 1, '自检失败就不再评分');
-  const down = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: async () => ({ ok: false, status: 502, json: async () => ({ error: 'bad gateway' }) }) });
+  const waits = [];
+  const sleep = async (ms) => { waits.push(ms); };
+  let n502 = 0;
+  const down = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep, fetchImpl: async () => { n502++; return { ok: false, status: 502, json: async () => ({ error: 'bad gateway' }) }; } });
   assert.equal(down.verdict, 'error');
+  assert.equal(n502, 3, '5xx 退避重试到上限');
+  assert.match(down.reason, /HTTP 502.*已重试 3 次/);
+  // 网络错误：报出 cause 里的真实原因与主机名，并重试；恢复后照常评分
+  const netErr = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('getaddrinfo ENOTFOUND gw.example'), { code: 'ENOTFOUND' }) });
+  const flaky = rig('openai', [CANARY, SCORE]);
+  let failed = 0;
+  const rec = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep, fetchImpl: async (u, i) => { if (failed++ < 1) throw netErr; return flaky.fetchImpl(u, i); } });
+  assert.equal(rec.verdict, 'pass', JSON.stringify(rec));
+  assert.deepEqual(waits.slice(0, 2), [15000, 30000], '退避递增');
+  const dead = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, retries: 2 }, fs, sleep, fetchImpl: async () => { throw netErr; } });
+  assert.match(dead.reason, /连不上评分服务 .*ENOTFOUND.*已重试 2 次/);
+  // 4xx（例如 key 无效）不重试
+  let n401 = 0;
+  await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep, fetchImpl: async () => { n401++; return { ok: false, status: 401, json: async () => ({}) }; } });
+  assert.equal(n401, 1);
   const nomodel = await run({ shotsDir: '/d', stylePath: '/style', env: { OPENAI_API_KEY: 'k' }, cfg: { ...cfg, model: '' }, fs, fetchImpl: g.fetchImpl });
   assert.match(nomodel.reason, /没有配置评分模型/);
   assert.equal((await run({ provider: 'x', shotsDir: '/d', stylePath: '/style', env, cfg, fs })).verdict, 'error');
