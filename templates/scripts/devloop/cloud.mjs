@@ -20,7 +20,7 @@ import { mergeAndPush } from './gitops.mjs';
 import { decide, eligible, hasTerminal, lastFindings, limitMode, roundsUsed, shouldReview } from './policy.mjs';
 import { createPrState } from './prstate.mjs';
 import { ensureFollowUps, followUpItems } from './followups.mjs';
-import { buildReviewPrompt, formatReview, touchesWorkflows, validateReview } from './review-format.mjs';
+import { buildReviewPrompt, formatReview, notifyLine, touchesWorkflows, validateReview } from './review-format.mjs';
 import { acceptanceGate, followUpsAccept, isInFlight, loadGates, ownerAcceptance, queueBlocker, runIdOf } from './accept.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -125,7 +125,7 @@ export async function finalize({ ghR, pr, state, body, writeBody, accept = null,
   if (!failed.length) return;
   const note = ['执行者：devloop（云端审核）', '', `以下动作重试 ${attempts} 次后仍失败，自动循环在此停下（已加 needs-user）。排除原因后手动执行：`, '',
     ...failed.map((f) => `- ${f.label}：\`${f.cmd}\`${f.err ? `（${f.err}）` : ''}`),
-    ...(failed.some((f) => f.label === '发审核评论') ? ['', '审核评论未能发出；可手动重跑本次云端审核：`gh workflow run gpt-review.yml -f pr=' + pr + '`'] : [])].join('\n');
+    ...(failed.some((f) => f.label === '发审核评论') ? ['', '审核评论未能发出；可手动重跑本次云端审核：`gh workflow run gpt-review.yml -f pr=' + pr + '`'] : [])].join('\n') + notifyLine();
   try { ghR(['pr', 'edit', String(pr), '--add-label', 'needs-user']); } catch { /* 尽力 */ }
   try { ghR(['pr', 'comment', String(pr), '--body-file', writeBody(note)]); } catch { /* 尽力 */ }
   throw new Error(`后续动作失败：${failed.map((f) => f.label).join('、')}`);
@@ -207,6 +207,7 @@ export async function runDecide({ pr, head, base, reviewResult, reviewPath, meta
       d.text = `审核与测试都通过，但合并未完成（${String(e.message).split('\n')[0]}），下一轮重试。`;
     }
   }
+  if (d.addLabel === 'needs-user') d.text += notifyLine(io.env ?? process.env);
   const body = formatReview({
     key: io.key,
     model: io.model,

@@ -11,6 +11,9 @@ if [ ! -f "$OUT/outcome" ]; then
   printf '执行者：Claude（devloop）\n\n云端执行任务失败或超时，没有产物，自动循环在此停下，请用户查看：%s\n' "$RUN_URL" > "$OUT/body.md"
 fi
 if [ "$(tr -d '[:space:]' < "$OUT/outcome")" != "pr" ]; then
+  # 停下等人：@ 负责人，GitHub 才会发通知（只加标签没人知道，见 review-format.mjs notifyLine）
+  who="${DEVLOOP_NOTIFY-${GITHUB_REPOSITORY_OWNER:-}}"
+  if [[ "$who" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]; then printf '\n@%s 自动循环已停下，需要你处理。\n' "$who" >> "$OUT/body.md"; fi
   gh issue comment "$N" -R "$REPO" --body-file "$OUT/body.md"
   gh issue edit "$N" -R "$REPO" --add-label needs-user
   echo "published=needs-user"

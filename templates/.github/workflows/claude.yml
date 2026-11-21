@@ -230,5 +230,7 @@ jobs:
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           printf '执行者：Claude（devloop）\n\n发布步骤失败（分支：%s）。可能是推送被拒（分支在此期间被更新）或开 PR / 评论失败。自动循环在此停下，请用户查看：%s\n' "${BRANCH:-未知}" "$RUN_URL" > report.md
+          # @ 仓库所有者：GitHub 才会发通知（只加标签没人知道）
+          printf '\n@%s 自动循环已停下，需要你处理。\n' "$GITHUB_REPOSITORY_OWNER" >> report.md
           gh issue comment "$N" -R "$REPO" --body-file report.md || true
           gh issue edit "$N" -R "$REPO" --add-label needs-user || true

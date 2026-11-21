@@ -84,7 +84,7 @@ function publishSetup({ outcome = 'pr', branch = 'claude/x', withBundle = true }
       env: { ...process.env, PATH: gh.path, OUT: out, REPO: 'o/r', N: '4', START: start, BRANCH: branch, PUSH_URL: remote, RUN_URL: 'https://run', ...env },
       encoding: 'utf8',
     });
-  return { run, gh, remote, start, newSha, ref: (r) => execFileSync('git', ['rev-parse', r], { cwd: remote, encoding: 'utf8' }).trim() };
+  return { run, gh, out, remote, start, newSha, ref: (r) => execFileSync('git', ['rev-parse', r], { cwd: remote, encoding: 'utf8' }).trim() };
 }
 
 test('publish：fix 推送到分支并评论；评论触发不动标签', () => {
@@ -148,6 +148,17 @@ test('publish：outcome 为 needs-user 或产物缺失 → 评论 + 加 needs-us
     assert.equal(r.status, 0, r.stderr);
     assert.match(t.gh.log(), /^issue edit 4 -R o\/r --add-label needs-user$/m);
     assert.equal(t.ref('refs/heads/claude/x'), t.start);
+  }
+});
+
+test('publish：停下等人时 @ 仓库所有者（GitHub 才会通知）；DEVLOOP_NOTIFY 为空则不 @，非法登录名不 @', () => {
+  for (const [env, want] of [[{ GITHUB_REPOSITORY_OWNER: 'alice' }, '@alice'], [{ GITHUB_REPOSITORY_OWNER: 'alice', DEVLOOP_NOTIFY: 'bob' }, '@bob'], [{ GITHUB_REPOSITORY_OWNER: 'alice', DEVLOOP_NOTIFY: '' }, null], [{ GITHUB_REPOSITORY_OWNER: 'a b;x' }, null]]) {
+    const t = publishSetup({ outcome: 'needs-user', withBundle: false });
+    const r = t.run({ MODE: 'fix', EVENT: 'issue_comment', DEVLOOP_NOTIFY: undefined, ...env });
+    assert.equal(r.status, 0, r.stderr);
+    const body = readFileSync(join(t.out, 'body.md'), 'utf8');
+    if (want) assert.match(body, new RegExp(`${want} 自动循环已停下`));
+    else assert.doesNotMatch(body, /@/);
   }
 });
 

@@ -24,7 +24,7 @@ import { decide, eligible, hasTerminal, lastFindings, limitMode, roundsUsed, sho
 import { createPrState } from './prstate.mjs';
 import { acceptanceGate, followUpsAccept, isAwaiting, loadGates, ownerAcceptance } from './accept.mjs';
 import { drainPending, followUpItems } from './followups.mjs';
-import { buildReviewPrompt, formatReview, touchesWorkflows, validateReview } from './review-format.mjs';
+import { buildReviewPrompt, formatReview, notifyLine, touchesWorkflows, validateReview } from './review-format.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_DIR = resolve(HERE, '../..');
@@ -199,6 +199,7 @@ async function reviewLocked(pr, { merge }) {
   }
   // auto 模式轮次用满合并：先把遗留意见待办清单落盘，再发评论；评论失败不影响补开 issue（见 followups.mjs）
   if (d.state === 'merged' && d.followUpFindings?.length) savePending(pr, followUpItems({ pr, head, findings: d.followUpFindings }));
+  if (d.addLabel === 'needs-user') d.text += notifyLine(process.env, REPO.split('/')[0]);
   try {
     comment(pr, format({ pr, head, review: rv ?? { verdict: 'error', summary: `GPT 审核未能完成：${reviewError}`, findings: [] }, ci, d }));
   } catch (e) {

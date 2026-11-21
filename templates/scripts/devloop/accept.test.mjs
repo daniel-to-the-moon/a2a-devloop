@@ -219,3 +219,17 @@ test('本机与云端两个合并入口都走 acceptanceGate（本机兜底改�
     assert.ok(gate > 0 && mergeAt > gate, `${f}：合并前先过 acceptanceGate`);
   }
 });
+
+test('停下等人 / 等用户确认时 @ 负责人：GitHub 只有被 @ 才会通知，光加标签没人知道', async () => {
+  const { notifyLine } = await import('./review-format.mjs');
+  assert.equal(notifyLine({ GITHUB_REPOSITORY_OWNER: 'alice' }), '\n\n@alice 自动循环已停下，需要你处理。');
+  assert.equal(notifyLine({}, 'owner-from-repo'), '\n\n@owner-from-repo 自动循环已停下，需要你处理。');
+  assert.equal(notifyLine({ GITHUB_REPOSITORY_OWNER: 'alice', DEVLOOP_NOTIFY: '' }), '', 'DEVLOOP_NOTIFY 为空 = 不提醒');
+  assert.equal(notifyLine({ DEVLOOP_NOTIFY: 'x y' }), '', '非法登录名不 @');
+  const visual = { paths: ['src/'], waitLabel: 'awaiting-acceptance', acceptLabel: 'accepted' };
+  const env = { GITHUB_REPOSITORY_OWNER: 'alice' };
+  const base = { pr: 3, head: 'abcdef0123', preview: 'https://p', runUrl: 'https://r', maxRounds: 3, visual, env };
+  assert.match(reportPlan({ ...base, judge: { verdict: 'pass', scores: null }, rounds: 0 }).body, /@alice 请看预览，确认画面后加 `accepted` 标签/);
+  assert.match(reportPlan({ ...base, judge: { verdict: 'fail', reason: 'x' }, rounds: 2 }).body, /@alice 自动循环已停下/);
+  assert.doesNotMatch(reportPlan({ ...base, judge: { verdict: 'fail', reason: 'x' }, rounds: 0 }).body, /@alice/, '交给 Claude 修时不打扰人');
+});

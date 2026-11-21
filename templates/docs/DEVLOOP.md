@@ -54,7 +54,7 @@
 
 | 标签 | 含义 |
 |---|---|
-| `needs-user` | 循环停下等用户：同一 PR 5 轮未通过（`ROUND_LIMIT_MODE=needs-user`，默认）；auto 模式下出现 blocker 或意见数回升；同一提交 3 次基础设施问题；Claude 判断命中停止条件；云端执行失败 |
+| `needs-user` | 循环停下等用户：同一 PR 5 轮未通过（`ROUND_LIMIT_MODE=needs-user`，默认）；auto 模式下出现 blocker 或意见数回升；同一提交 3 次基础设施问题；Claude 判断命中停止条件；云端执行失败。这些评论会 @ 仓库所有者（GitHub 才会通知；环境变量 `DEVLOOP_NOTIFY` 可改成别人，设为空则不 @），等视觉验收的结果评论同样会 @ |
 | `hold` | 用户手动暂停某 PR |
 
 Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费 / 广告 / 对公众上线；需要新的付费服务或账号；需求互相矛盾或违反项目硬边界；信息不足。

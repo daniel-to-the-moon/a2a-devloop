@@ -104,3 +104,13 @@ export function followUpIssues({ pr, head, findings }) {
     return { title, body };
   });
 }
+
+/**
+ * 停下等人时 @ 提醒负责人（GitHub 会给被 @ 的人发通知 / 邮件）。只加标签和评论不会提醒任何人：
+ * （曾发生：模型网关账号被停用，云端修复连续失败停下一天多才被发现。）
+ * 被提醒的人：DEVLOOP_NOTIFY（设为空字符串 = 不提醒）> GITHUB_REPOSITORY_OWNER > fallback（本机传仓库所有者）。
+ */
+export function notifyLine(env = process.env, fallback = '', why = '自动循环已停下，需要你处理') {
+  const who = env.DEVLOOP_NOTIFY ?? (env.GITHUB_REPOSITORY_OWNER || fallback);
+  return who && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(who) ? `\n\n@${who} ${why}。` : '';
+}

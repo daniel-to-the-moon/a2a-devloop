@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eligible, hasSkipLabel } from './policy.mjs';
-import { CLOUD_REVIEWER_LOGINS } from './review-format.mjs';
+import { CLOUD_REVIEWER_LOGINS, notifyLine } from './review-format.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 /** gates.json 不存在 → null（验收与排期模块未安装，云端审核照旧） */
@@ -116,7 +116,7 @@ export const ownerAcceptance = ({ gh, repo, owner, label }) => (p, h, markers) =
  * judge：visual-judge.mjs 的输出；preview：预览地址（可空，发布失败时）；rounds：此前未达标轮数。
  * 返回 { action: 'await' | 'fix' | 'stop', labelsAdd, labelsRemove, body }
  */
-export function reportPlan({ pr, head, judge, preview, runUrl, rounds, maxRounds, visual }) {
+export function reportPlan({ pr, head, judge, preview, runUrl, rounds, maxRounds, visual, env = process.env }) {
   const lines = [VISUAL_PREFIX, ''];
   lines.push(`PR #${pr} 的代码审核与合并后测试已通过；本 PR 改动画面，合并前需要视觉验收（提交 \`${head.slice(0, 8)}\`）。`, '');
   lines.push(preview ? `- 预览地址（需 Cloudflare Access 登录）：${preview}` : '- 预览发布失败，见运行日志');
@@ -130,14 +130,14 @@ export function reportPlan({ pr, head, judge, preview, runUrl, rounds, maxRounds
   if (judge?.verdict === 'fail') {
     if (rounds + 1 >= maxRounds) {
       lines.push(`结论：未达标（${judge.reason}）。已 ${rounds + 1} 轮未达标（上限 ${maxRounds}），停下等用户决定（已加 needs-user）。`);
-      return { action: 'stop', labelsAdd: ['needs-user'], labelsRemove: [visual.waitLabel], body: lines.join('\n') };
+      return { action: 'stop', labelsAdd: ['needs-user'], labelsRemove: [visual.waitLabel], body: lines.join('\n') + notifyLine(env) };
     }
     lines.push(`结论：未达标（${judge.reason}）。交给云端 Claude 按上面的意见修改（第 ${rounds + 1} 轮，上限 ${maxRounds}）。`);
     return { action: 'fix', labelsAdd: [], labelsRemove: [visual.waitLabel], body: lines.join('\n') };
   }
   const why = judge?.verdict === 'pass' ? '模型评分达标' : `模型评分没有完成（${judge?.reason ?? '未知原因'}），请直接人工看`;
   lines.push(`结论：${why}，等你拍板。满意就给本 PR 加 \`${visual.acceptLabel}\` 标签，下一轮自动合并；不满意就在下面写意见。`);
-  return { action: 'await', labelsAdd: [visual.waitLabel], labelsRemove: [], body: lines.join('\n') };
+  return { action: 'await', labelsAdd: [visual.waitLabel], labelsRemove: [], body: lines.join('\n') + notifyLine(env, '', '请看预览，确认画面后加 `' + visual.acceptLabel + '` 标签') };
 }
 
 function arg(name) {
