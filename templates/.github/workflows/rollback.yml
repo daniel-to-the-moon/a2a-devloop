@@ -1,0 +1,37 @@
+# 一键回滚正式站（发布把关角色，docs/DEVLOOP.md “验收与发布角色”）：Actions → rollback → Run workflow。
+# 用 Cloudflare Pages 的回滚接口切回上一次（或指定的）成功正式发布，不重新构建、不执行仓库代码；main 不变，修好后照常合并发布。
+name: rollback
+run-name: rollback ${{ inputs.deployment || '上一版' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment: { description: '回滚到的 Cloudflare 发布 ID（留空 = 上一次成功的正式发布）', required: false }
+
+permissions: {}
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  rollback:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: scripts/devloop
+          persist-credentials: false
+      - name: 回滚
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PROJECT: ${{ vars.PAGES_PROJECT }}
+          TARGET: ${{ inputs.deployment }}
+        run: bash scripts/devloop/rollback.sh

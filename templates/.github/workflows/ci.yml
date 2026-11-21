@@ -84,6 +84,12 @@ jobs:
           bash -c "$PREVIEW_CMD" > "$RUNNER_TEMP/preview.log" 2>&1 &
           for i in $(seq 1 30); do curl -fsS http://127.0.0.1:4173/ > /dev/null && break; sleep 1; done
           E2E_ARTIFACTS="$RUNNER_TEMP/e2e" node scripts/e2e/smoke.mjs http://127.0.0.1:4173/
+      # 性能验收 + 固定机位截图（scripts/e2e/gates.mjs）：WebGL draw call / 三角形超出 scripts/e2e/budgets.json 即失败 → 不合并、不发布。
+      # 截图（营地俯瞰、行驶中、手机竖屏模拟）与 perf.json 写进同一个产物目录，供视觉验收（accept.yml）与人工查看。
+      - name: 性能验收与固定机位截图
+        id: gates
+        if: steps.e2e.conclusion == 'success' && hashFiles('scripts/e2e/gates.mjs') != ''
+        run: E2E_ARTIFACTS="$RUNNER_TEMP/e2e" node scripts/e2e/gates.mjs http://127.0.0.1:4173/
       - name: 上传冒烟截图
         if: always() && steps.e2e.conclusion != 'skipped' && steps.e2e.conclusion != ''
         uses: actions/upload-artifact@v4
@@ -92,6 +98,14 @@ jobs:
           path: ${{ runner.temp }}/e2e
           retention-days: 7
           if-no-files-found: ignore
+      # devloop 触发（PR 合并到 main 后的组合）：上传构建产物，供 accept.yml 发 PR 预览（只有改画面的 PR 会用到）
+      - name: 上传构建产物（PR 预览用）
+        if: github.event_name == 'workflow_dispatch' && inputs.deploy_main != 'true' && steps.app.outputs.yes == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-pr${{ inputs.pr }}-${{ inputs.head }}
+          path: dist
+          retention-days: 7
       - name: 上传发布产物（main）
         if: (github.event_name == 'push' || inputs.deploy_main == 'true') && steps.app.outputs.yes == '1'
         uses: actions/upload-artifact@v4

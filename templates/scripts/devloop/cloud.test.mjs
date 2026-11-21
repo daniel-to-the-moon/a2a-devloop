@@ -87,11 +87,21 @@ test('select：不调用 gh api user；跳过改工作流的 PR；认得云端�
   const r = select([
     { number: 3, view: view(H, { files: ['.github/workflows/x.yml'] }) },
     { number: 4, view: view('c'.repeat(40), { comments: [botReview(4, 'changes', 'c'.repeat(40))] }) },
-    { number: 5, view: view('d'.repeat(40)) },
+    // 与 #4 改的不是同一文件（同一文件会按合并排期排在 #4 后面，见下一条测试）
+    { number: 5, view: view('d'.repeat(40), { files: ['src/b.ts'] }) },
   ]);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /^pr=5\nhead=d{40}\nbase=b{40}\n/);
   assert.doesNotMatch(r.log, /^api user/m);
+});
+
+test('select：合并排期——与更早、仍在途的 PR 改同一文件就排队；前面的 PR 等人（needs-user / 等视觉验收）时不挡', { skip: !existsSync(join(HERE, 'gates.json')) && '未安装验收与发布角色（gates.json）' }, () => {
+  const busy = { number: 4, view: view('c'.repeat(40), { comments: [botReview(4, 'changes', 'c'.repeat(40))] }) };
+  assert.match(select([busy, { number: 5, view: view('d'.repeat(40)) }]).out, /^pr=\n/);
+  for (const labels of [['needs-user'], ['awaiting-acceptance']]) {
+    const parked = { number: 4, view: { ...view('c'.repeat(40)), labels: labels.map((name) => ({ name })) } };
+    assert.match(select([parked, { number: 5, view: view('d'.repeat(40)) }]).out, /^pr=5\n/, labels.join());
+  }
 });
 
 test('select：没有可审的 PR 时输出空 pr；--pr 只看指定的那个', () => {
@@ -344,8 +354,9 @@ test('gpt-review.yml：prompt 收到 select 选定的 head', { skip: optionalMis
  * decide 入口级测试：替换 GitHub / CI / git 接口，记录调用顺序。
  * states：prState 依次返回的 PR 状态（最后一个重复使用）；push：'ok' | 'fail'（mergeAndPush 是否抛错，成功前会先调用 beforePush）
  */
-function decideRig({ reviewResult = 'success', review = { verdict: 'approve', summary: 'ok', findings: [] }, ci = 'ok', states = [{}], push = 'ok', mainBase = B, limitMode } = {}) {
+function decideRig({ reviewResult = 'success', review = { verdict: 'approve', summary: 'ok', findings: [] }, ci = 'ok', states = [{}], push = 'ok', mainBase = B, limitMode, gates, acceptance = 'none', ciUrl = '' } = {}) {
   const calls = [];
+  const full = [];
   const pr = { title: 't', headRefOid: H, headRefName: 'claude/x', isCrossRepository: false, baseRefName: 'main', state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', labels: [], markers: [], files: ['src/a.ts'] };
   let i = 0;
   const io = {
@@ -353,10 +364,12 @@ function decideRig({ reviewResult = 'success', review = { verdict: 'approve', su
     model: 'm',
     limitMode,
     sleep: async () => {},
-    ghR: (args) => { calls.push(args.slice(0, 3).join(' ')); return args[0] === 'issue' && args[1] === 'create' ? `https://github.com/o/r/issues/${90 + calls.filter((c) => c.startsWith('issue create')).length}\n` : ''; },
+    gates,
+    acceptance: () => acceptance,
+    ghR: (args) => { calls.push(args.slice(0, 3).join(' ')); full.push(args.join(' ')); return args[0] === 'issue' && args[1] === 'create' ? `https://github.com/o/r/issues/${90 + calls.filter((c) => c.startsWith('issue create')).length}\n` : ''; },
     prState: () => ({ ...pr, ...states[Math.min(i++, states.length - 1)] }),
     mainSha: () => mainBase,
-    runCi: async (p) => { calls.push(`ci ${p.pr} ${p.head.slice(0, 4)} ${p.base.slice(0, 4)}`); return { status: ci, base: B, url: '' }; },
+    runCi: async (p) => { calls.push(`ci ${p.pr} ${p.head.slice(0, 4)} ${p.base.slice(0, 4)}`); return { status: ci, base: B, url: ciUrl }; },
     fetch: () => calls.push('fetch'),
     mergeAndPush: (opts) => {
       calls.push(`merge ${opts.base.slice(0, 4)}+${opts.head.slice(0, 4)}`);
@@ -369,7 +382,7 @@ function decideRig({ reviewResult = 'success', review = { verdict: 'approve', su
   };
   const files = { 'r.json': JSON.stringify(review), 'm.json': JSON.stringify({ pr: '7', head: H, base: B }) };
   const run = () => runDecide({ pr: 7, head: H, base: B, reviewResult, reviewPath: 'r.json', metaPath: 'm.json', read: (f) => files[f], exists: (f) => f in files }, io);
-  return { calls, run };
+  return { calls, full, run };
 }
 const merged = (calls) => calls.includes('pushed');
 const deployed = (calls) => calls.some((c) => c.startsWith('workflow run ci.yml'));
@@ -496,4 +509,40 @@ test('finalize：issue 创建成功但响应丢失 → 重新核对找回编号�
   assert.equal(created.length, 1);
   assert.ok(calls.includes('workflow run claude.yml -f'));
   assert.equal(calls.filter((c) => c.startsWith('issue create')).length, 1);
+});
+
+test('runDecide 发布把关：改画面的 PR 审核与 CI 都通过但用户没确认 → 不合并，加 awaiting-acceptance，触发预览与视觉评分', async () => {
+  const gates = { judge: {}, visual: { waitLabel: 'awaiting-acceptance', acceptLabel: 'accepted', paths: ['src/geometry/'] } };
+  const vis = { files: ['src/geometry/placeholder.ts'] };
+  const url = 'https://github.com/o/r/actions/runs/4242';
+  const r = decideRig({ gates, states: [vis], ciUrl: url });
+  const out = await r.run();
+  assert.equal(out.state, 'retry');
+  assert.ok(!merged(r.calls) && !deployed(r.calls));
+  assert.ok(r.full.includes('pr edit 7 --add-label awaiting-acceptance'));
+  assert.ok(r.full.includes(`workflow run accept.yml --ref main -f pr=7 -f head=${H} -f run=4242`), r.full.join('\n'));
+  assert.ok(r.full.findIndex((c) => c.startsWith('pr comment 7')) < r.full.findIndex((c) => c.startsWith('workflow run accept.yml')), '先评论再触发');
+  // 用户已确认 → 合并
+  const ok = decideRig({ gates, states: [vis], ciUrl: url, acceptance: 'accepted' });
+  assert.equal((await ok.run()).state, 'merged');
+  // 确认早于最新提交 → 摘掉 accepted，重新走验收
+  const stale = decideRig({ gates, states: [vis], ciUrl: url, acceptance: 'stale' });
+  assert.equal((await stale.run()).state, 'retry');
+  assert.ok(stale.full.includes('pr edit 7 --remove-label accepted'));
+  // 不改画面的 PR 不受影响；没启用 gates 也不受影响
+  assert.equal((await decideRig({ gates, ciUrl: url }).run()).state, 'merged');
+  assert.equal((await decideRig({ states: [vis], ciUrl: url }).run()).state, 'merged');
+  // 拿不到 CI 运行号：仍不合并，只评论说明，不触发
+  const nourl = decideRig({ gates, states: [vis] });
+  assert.equal((await nourl.run()).state, 'retry');
+  assert.ok(!nourl.full.some((c) => c.startsWith('workflow run accept.yml')));
+  // 审核不通过时照常交 Claude 修，不走验收
+  const bad = decideRig({ gates, states: [vis], ciUrl: url, review: { verdict: 'request_changes', summary: 'x', findings: [{ severity: 'major', file: 'a.ts', line: 3, issue: 'i', suggestion: 's' }] } });
+  assert.equal((await bad.run()).state, 'changes');
+  assert.ok(!bad.full.some((c) => c.startsWith('workflow run accept.yml')));
+});
+
+test('followUps：retry + accept 才触发 accept.yml', () => {
+  assert.deepEqual(followUps('retry', 7), []);
+  assert.deepEqual(followUps('retry', 7, { head: H, run: '1' }), [['workflow', 'run', 'accept.yml', '--ref', 'main', '-f', 'pr=7', '-f', `head=${H}`, '-f', 'run=1']]);
 });

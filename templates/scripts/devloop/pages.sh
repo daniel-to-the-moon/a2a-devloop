@@ -16,6 +16,8 @@
 #   ANALYTICS  为 "on" 时启用匿名统计：确保 D1 数据库与表存在、清理超过保留期的记录，连同 functions/ 一起发布
 #   FUNCTIONS_DIR  Pages Functions 目录（取自 main 的 functions/，内含 api/ev.js；schema.sql 在其中）
 #   RETENTION_DAYS 统计记录保留天数（默认 180，提案值；不得超过隐私说明承诺的 180）
+#   PREVIEW_BRANCH 设置时为“PR 预览”发布（accept.yml 发布把关角色）：只发到该分支的预览地址 https://<分支>.<子域>，
+#                  不做 main 最新检查、不带 functions / 统计；无论 PUBLIC 如何都要求预览地址受 Access 保护。只允许 pr-<数字>。
 set -euo pipefail
 : "${CF_API:=https://api.cloudflare.com/client/v4}"
 : "${WRANGLER:=npx -y wrangler@4.158.0}"
@@ -59,8 +61,13 @@ if [ "${DEPLOY:-}" != "true" ]; then
   exit 0
 fi
 
+if [ -n "${PREVIEW_BRANCH:-}" ]; then
+  [[ "$PREVIEW_BRANCH" =~ ^pr-[1-9][0-9]{0,6}$ ]] || { echo "::error::预览分支名只能是 pr-<编号>：$PREVIEW_BRANCH" >&2; exit 1; }
+  [ -f "$DIST/index.html" ] || { echo "::error::构建产物 $DIST 不完整（缺 index.html）" >&2; exit 1; }
+fi
+
 # 3. 过期检查：只发布 main 当前最新提交（防止慢的旧运行或历史重跑把环境回退到旧版本）
-latest=$(gh api "repos/$REPO/commits/main" -q .sha)
+latest=$(if [ -n "${PREVIEW_BRANCH:-}" ]; then echo "$SHA"; else gh api "repos/$REPO/commits/main" -q .sha; fi)
 if [ "$latest" != "$SHA" ]; then
   echo "跳过：本次运行的提交 ${SHA:0:8} 已不是 main 最新（${latest:0:8}），由更新的运行发布。" | tee -a "$SUMMARY"
   exit 0
@@ -84,7 +91,13 @@ protected() { # protected <主机名>
 }
 # 公开模式只豁免正式地址；预览地址无论如何都必须仍受 Access 保护（公开上线时误删通配符那一行，发布会被拒）
 hosts=("$subdomain" "devloop-access-check.$subdomain")
-if [ "${PUBLIC:-}" = "true" ]; then
+if [ -n "${PREVIEW_BRANCH:-}" ]; then
+  # 预览只给用户看：预览地址必须受保护（与正式站是否公开无关）
+  for host in "$PREVIEW_BRANCH.$subdomain" "devloop-access-check.$subdomain"; do
+    protected "$host" || { echo "::error::预览地址 $host 未确认受 Cloudflare Access 保护，拒绝上传预览。" >&2; exit 1; }
+  done
+  hosts=() # 正式地址与预览无关，不再检查
+elif [ "${PUBLIC:-}" = "true" ]; then
   echo "公开发布（PAGES_PUBLIC=true）：正式地址 https://$subdomain 任何人都能访问；预览地址仍要求 Access 保护" | tee -a "$SUMMARY"
   hosts=("devloop-access-check.$subdomain")
 fi
@@ -100,6 +113,14 @@ done
 #    任何一步失败都整体失败、不上传（不会发布一个统计端点指向不存在的数据库的版本）。
 site="$DIST"
 workdir="$PWD"
+if [ -n "${PREVIEW_BRANCH:-}" ]; then
+  # 在空目录里发布：wrangler 会自动带上当前目录的 functions/，预览不能带统计端点
+  mkdir -p "$tmp/preview"
+  (cd "$tmp/preview" && $WRANGLER pages deploy "$DIST" --project-name "$PROJECT" --branch "$PREVIEW_BRANCH" --commit-hash "$SHA" --commit-dirty=true)
+  echo "已发布预览 ${SHA:0:8} → https://$PREVIEW_BRANCH.$subdomain（需 Access 登录）" | tee -a "$SUMMARY"
+  echo "preview=https://$PREVIEW_BRANCH.$subdomain"
+  exit 0
+fi
 if [ "${ANALYTICS:-}" = "on" ]; then
   [ -f "${FUNCTIONS_DIR:-}/api/ev.js" ] && [ -f "$FUNCTIONS_DIR/schema.sql" ] || { echo "::error::缺少 functions 目录（api/ev.js、schema.sql）：${FUNCTIONS_DIR:-未设置}" >&2; exit 1; }
   dbname="$PROJECT-analytics"

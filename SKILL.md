@@ -21,7 +21,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
    预览 *.<项目>.pages.dev 始终受 Access 保护；正式地址 PAGES_PUBLIC=true 才公开；ANALYTICS=on 连同 D1 匿名统计一起发布
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test templates/scripts/devloop/*.test.mjs` 141 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test templates/scripts/devloop/*.test.mjs` 159 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 零、适用场景（先判断该不该用这套）
 
@@ -97,7 +97,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 
 适用：不想依赖用户电脑在线；希望两个不同模型都通过才合并。
 
-1. 复制 `templates/.github/workflows/gpt-review.yml`、`templates/scripts/devloop/{cloud,combine-review}.mjs` 及其测试。
+1. 复制 `templates/.github/workflows/gpt-review.yml`、`templates/scripts/devloop/{cloud,combine-review,accept}.mjs` 及其测试（`accept.mjs` 是 cloud.mjs 的依赖；不放 `gates.json` 就不启用二·九的把关与排期）。
 2. 凭据：`OPENAI_API_KEY`（网关时加变量 `GPT_RESPONSES_ENDPOINT`、`GPT_MODEL`）；`ANTHROPIC_API_KEY`（与 claude.yml 共用；第二审核方模型用变量 `CLAUDE_REVIEW_MODEL`，未设沿用 `CLAUDE_MODEL`）；`DEVLOOP_MARKER_KEY`（与本机审核方同一把）。
 3. 开关：`gh variable set CLOUD_REVIEW --body on`；`SECOND_REVIEW=off` 可关掉 Claude 那一方。先手动 `gh workflow run gpt-review.yml -f pr=<N>` 验证一次再开定时。
 4. 第二审核方只给 `Read,Glob,Grep`，diff 由工作流预先生成到只读目录；`--setting-sources user --strict-mcp-config` 不加载 PR 里的 `.claude/settings.json` 与 `.mcp.json`（否则 PR 可借钩子在持有 key 的环境里执行命令）。`combine-review.test.mjs` 读取真实 YAML 校验这些约束，升级 Claude Code 版本后要重新实测。
@@ -112,6 +112,25 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 照 `templates/docs/LAUNCH.md` 的配置清单逐步做，每步都有验证；匿名统计见 `templates/docs/ANALYTICS.md`，接收端与表结构在 `templates/functions/`（替换 `EVENTS` 白名单与日界时区）。
 仓库变量：`PAGES_PROJECT`（设了才运行发布与每日清理）、`PAGES_DEPLOY`、`PAGES_PUBLIC`、`ANALYTICS`、`RETENTION_DAYS`。**关功能改值，不删变量。**
 密钥只让用户自己 `gh secret set`；账户 ID、令牌值、数据库 ID 不写进仓库。
+
+## 二·九、可选：验收与发布角色（性能、视觉、预览确认、回滚、合并排期、真机试玩）
+
+适用：产品有“看得见”的部分（游戏、前端页面），模型互审只能审代码、管不了好不好看、卡不卡；以及合并到 main 就是对外发布、想先看预览再放行。需要云端审核（二·六）与发布模块（二·八）。
+
+| 角色 | 文件 | 做什么 |
+|---|---|---|
+| 性能验收 | `scripts/e2e/gates.example.mjs` → `gates.mjs`、`budgets.example.json` → `budgets.json`、`gates-lib.mjs` | CI 里给 WebGL `draw*` 计数（页面脚本运行前注入，不依赖项目的调试钩子），固定场景超预算即 CI 失败；同时出固定机位截图与手机竖屏模拟截图 |
+| 视觉验收 | `scripts/devloop/visual-judge.mjs`、`docs/visual/STYLE.md`、可选 `docs/visual/reference.png` | 截图 + main 上一版截图 + 风格说明交多模态模型打五项分；**先做多模态自检**（程序生成的四色方块图，答错 = 这个模型看不了图，结果一律不放行） |
+| 发布把关 | `accept.yml`、`scripts/devloop/accept.mjs`、`pages.sh` 的 `PREVIEW_BRANCH`、`rollback.yml` + `rollback.sh` | 改画面的 PR（`gates.json` visual.paths）过审核与 CI 后不合并：发 Access 保护的预览 `pr-<编号>.<子域>` → 评分 → 达标加 `awaiting-acceptance`，用户加 `accepted`（只认仓库所有者、晚于最新提交）才合并；未达标交 Claude 修，最多 3 轮。正式站一键回滚到上一次成功发布 |
+| 合并排期 | `cloud.mjs select` + `accept.mjs queueBlocker` | 与更早、在途的 PR 改同一文件就排队；前面的 PR 在等人（needs-user / hold / 等视觉验收）时不挡队 |
+| 真机试玩 | `.github/ISSUE_TEMPLATE/playtest.md` | 用户每个里程碑在自己手机上玩一次；设备模拟截图不是真机，云真机服务要付费，问用户 |
+
+1. 复制上表文件与 `accept.test.mjs`、`perf-gate.test.mjs`；没有 `gates.json` 时云端审核照旧（不启用把关与排期）。
+2. 按项目改：`gates.json` 的 `visual.paths`（真正影响画面的路径）与 `judge.shots`；`gates.mjs` 里标“按项目改”的画布选择器、关弹窗、第二个场景的操作；`STYLE.md` 写具体色值与风格。先在 main 上跑一次 `gates.mjs` 记基线，预算设为基线 ×1.2–1.3。
+3. **评分方由用户定，默认不让写代码的模型自评**：仓库变量 `VISUAL_PROVIDER`（`openai` 默认 / `anthropic`）+ `VISUAL_MODEL`（openai 时缺省用 `GPT_MODEL`）。想比较候选模型时，手动 `gh workflow run accept.yml -f pr=<N> -f head=<SHA> -f run=<CI 运行号> -f provider=<…> -f model=<…> -f report=false` 各跑一次，把结果匿名给用户打分，这是一次性的试验，不要写进流程。
+4. 标签由 `accept.yml` 自动创建（`awaiting-acceptance`、`accepted`）。
+5. 这些改动都在 `.github/workflows/`，云端审核合不了，由本机审核方或用户合并。
+6. 残余风险如实告诉用户：截图由 PR 代码渲染，PR 可以画出好看的截图或在图里写字诱导评分——模型评分只是初筛，最后由用户看预览；SwiftShader 下的帧时间与真机无关，不判定。
 
 ## 三、设计要点（每一条都是真实审核里被打回过的）
 

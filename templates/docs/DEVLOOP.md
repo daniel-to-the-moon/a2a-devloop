@@ -91,6 +91,21 @@ Claude 遇到以下情况不写代码，说明原因并加 `needs-user`：收费
 
 把 `scripts/e2e/smoke.example.mjs` 按产品核心路径改好、改名为 `scripts/e2e/smoke.mjs`，`ci.yml` 就会在构建后用 Playwright 打开构建产物跑一遍；失败即 CI 失败（不合并、不发布），截图作为 Actions 产物保留 7 天。项目需把 `playwright` 加进 devDependencies；预览命令可用仓库变量 `E2E_PREVIEW_CMD` 覆盖（须监听 `127.0.0.1:4173`）。
 
+## 验收与发布角色（可选，`scripts/devloop/gates.json`）
+
+模型互审只审代码。改画面的 PR 另外过五道：
+
+| 角色 | 谁来做 | 不通过时 |
+|---|---|---|
+| 性能验收 | `ci.yml` → `scripts/e2e/gates.mjs`：WebGL draw call / 三角形按固定场景比 `scripts/e2e/budgets.json` | CI 失败，交 Claude 修 |
+| 视觉验收 | `accept.yml` judge → `visual-judge.mjs`：截图 + 上一版截图 + `docs/visual/STYLE.md`（+ 参考图）交多模态模型打分，先做多模态自检 | 未达标交 Claude 修（最多 3 轮后 `needs-user`）；评分没完成不自动通过 |
+| 发布把关 | `cloud.mjs decide` + `accept.yml` preview：过审核与 CI 后发 Access 保护的预览 `pr-<编号>.<子域>`，加 `awaiting-acceptance` | 用户加 `accepted`（仓库所有者、晚于最新提交）才合并；正式站出问题：Actions → rollback |
+| 合并排期 | `cloud.mjs select`：与更早、在途的 PR 改同一文件就排队 | 前面的 PR 在等人时不挡队 |
+| 真机试玩 | 用户每个里程碑按 `.github/ISSUE_TEMPLATE/playtest.md` 在手机上玩一次 | 开 issue |
+
+评分方：仓库变量 `VISUAL_PROVIDER`（`openai` 默认 / `anthropic`）+ `VISUAL_MODEL`；写代码的是 Claude，默认不让它自评。
+标签：`awaiting-acceptance`（等用户看预览，云端审核不再处理）、`accepted`（用户确认，下一轮合并）。
+
 ## 发布与上线（可选）
 
 见 `docs/LAUNCH.md`：内部预览由 Cloudflare Access 保护、正式地址由用户用 `PAGES_PUBLIC=true` 决定何时公开；匿名统计见 `docs/ANALYTICS.md`。开关都是仓库变量，**改值、不删变量**。

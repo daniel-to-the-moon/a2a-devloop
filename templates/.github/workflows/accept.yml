@@ -1,0 +1,185 @@
+# 验收与发布角色（docs/DEVLOOP.md “验收与发布角色”）：改画面的 PR 在代码审核与合并后测试都通过之后，由云端审核（cloud.mjs decide）触发。
+#   preview：把 CI 构建好的 dist 发到 Cloudflare Pages 预览地址 https://pr-<编号>.<子域>（必须受 Access 保护），不带统计 functions；
+#   judge  ：下载 CI 的固定机位截图与 main 上一版截图，连同 docs/visual/STYLE.md、reference.png 交给多模态模型评分（先做多模态自检）；
+#   report ：在 PR 下发结论：达标 → 加 awaiting-acceptance 等用户加 accepted；未达标 → 触发云端 Claude 修；到上限 → needs-user。
+# 信任边界：只用 main 上的定义（手动触发也必须 --ref main）；三个任务都不执行 PR 代码（dist 只上传、截图只当图片数据）。
+#   Cloudflare 凭据只在 preview，模型 key 只在 judge，写权限只在 report。
+# 评分方：仓库变量 VISUAL_PROVIDER（openai | anthropic，默认 openai）+ VISUAL_MODEL；手动触发可用 provider / model 临时覆盖，
+#   report=false 时只评分不发评论、不发预览（用于试评分方）。
+name: accept
+run-name: accept PR#${{ inputs.pr }} ${{ inputs.provider || vars.VISUAL_PROVIDER || 'openai' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr: { description: 'PR 编号', required: true }
+      head: { description: 'PR 头部提交（完整 SHA）', required: true }
+      run: { description: '测过这个组合的 ci.yml 运行号', required: true }
+      provider: { description: '临时指定评分服务（openai | anthropic；留空用仓库变量）', required: false }
+      model: { description: '临时指定评分模型（留空用仓库变量）', required: false }
+      report: { description: "'false'：只评分，不发预览、不评论", required: false, default: 'true' }
+
+permissions: {}
+
+concurrency:
+  group: accept-${{ inputs.pr }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: 核对输入，确认 CI 运行确实测过这个 PR 头部
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          HEAD_SHA: ${{ inputs.head }}
+          RUN: ${{ inputs.run }}
+          PROVIDER: ${{ inputs.provider }}
+        run: |
+          set -euo pipefail
+          [[ "$PR" =~ ^[1-9][0-9]{0,6}$ ]] || { echo "::error::PR 编号无效"; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::head 必须是 40 位 SHA"; exit 1; }
+          [[ "$RUN" =~ ^[1-9][0-9]{0,14}$ ]] || { echo "::error::运行号无效"; exit 1; }
+          case "$PROVIDER" in '' | openai | anthropic) ;; *) echo "::error::provider 只能是 openai 或 anthropic"; exit 1 ;; esac
+          title=$(gh api "repos/$REPO/actions/runs/$RUN" -q '.display_title + " " + .conclusion + " " + .path')
+          [[ "$title" == *"PR#$PR success .github/workflows/ci.yml" ]] || { echo "::error::运行 $RUN 不是 PR #$PR 成功的 devloop CI：$title"; exit 1; }
+          gh api "repos/$REPO/actions/runs/$RUN/artifacts" -q '.artifacts[].name' | grep -qx "dist-pr$PR-$HEAD_SHA" \
+            || { echo "::error::运行 $RUN 没有 PR #$PR 头部 ${HEAD_SHA:0:8} 的构建产物"; exit 1; }
+
+  preview:
+    needs: check
+    if: github.ref == 'refs/heads/main' && inputs.report != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      url: ${{ steps.deploy.outputs.preview }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: scripts/devloop
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-pr${{ inputs.pr }}-${{ inputs.head }}
+          path: dist
+          run-id: ${{ inputs.run }}
+          github-token: ${{ github.token }}
+      - name: 发布 PR 预览
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PROJECT: ${{ vars.PAGES_PROJECT }}
+          SHA: ${{ inputs.head }}
+          DEPLOY: ${{ vars.PAGES_DEPLOY }}
+          DIST: ${{ github.workspace }}/dist
+          PREVIEW_BRANCH: pr-${{ inputs.pr }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/devloop/pages.sh | tee -a "$GITHUB_OUTPUT"
+
+  judge:
+    needs: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: |
+            scripts/devloop
+            docs/visual
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: 下载本 PR 与 main 上一版的截图
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ inputs.run }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr" "$RUNNER_TEMP/base"
+          gh run download "$RUN" -R "$REPO" -p 'e2e-*' -D "$RUNNER_TEMP/pr-raw"
+          find "$RUNNER_TEMP/pr-raw" -maxdepth 2 -name '*.png' -exec cp {} "$RUNNER_TEMP/pr/" \;
+          # 基线：main 最近一次成功发布（push 或 deploy main）的截图；没有就不比较
+          base=$(gh run list -R "$REPO" --workflow ci.yml --branch main --status success --limit 20 --json databaseId,event,displayTitle \
+            -q '[.[] | select(.event == "push" or .displayTitle == "deploy main")][0].databaseId // empty')
+          if [ -n "$base" ] && gh run download "$base" -R "$REPO" -p 'e2e-*' -D "$RUNNER_TEMP/base-raw"; then
+            find "$RUNNER_TEMP/base-raw" -maxdepth 2 -name '*.png' -exec cp {} "$RUNNER_TEMP/base/" \;
+          fi
+          ls -la "$RUNNER_TEMP/pr" "$RUNNER_TEMP/base"
+      - name: 视觉评分
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          VISUAL_PROVIDER: ${{ inputs.provider || vars.VISUAL_PROVIDER || 'openai' }}
+          VISUAL_MODEL: ${{ inputs.model || vars.VISUAL_MODEL }}
+          GPT_MODEL: ${{ vars.GPT_MODEL }}
+          # 只把选中服务的 key 交给本步骤
+          OPENAI_API_KEY: ${{ (inputs.provider || vars.VISUAL_PROVIDER || 'openai') == 'openai' && secrets.OPENAI_API_KEY || '' }}
+          GPT_RESPONSES_ENDPOINT: ${{ vars.GPT_RESPONSES_ENDPOINT }}
+          ANTHROPIC_API_KEY: ${{ (inputs.provider || vars.VISUAL_PROVIDER || 'openai') == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}
+          ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+        run: |
+          set -euo pipefail
+          title=$(gh pr view "$PR" -R "$REPO" --json title -q .title)
+          node scripts/devloop/visual-judge.mjs --shots "$RUNNER_TEMP/pr" --baseline "$RUNNER_TEMP/base" \
+            --reference docs/visual/reference.png --style docs/visual/STYLE.md --title "$title" --out "$RUNNER_TEMP/judge.json"
+          { echo '### 视觉评分'; echo '```json'; jq 'del(.usage)' "$RUNNER_TEMP/judge.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: judge-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/judge.json
+
+  report:
+    needs: [check, preview, judge]
+    if: always() && github.ref == 'refs/heads/main' && inputs.report != 'false' && needs.check.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: scripts/devloop
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        if: needs.judge.result == 'success'
+        continue-on-error: true
+        with:
+          name: judge-${{ github.run_id }}-${{ github.run_attempt }}
+          path: judge
+      - name: 发结论、改标签、需要时触发修复
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh label create awaiting-acceptance -R "$REPO" --color FBCA04 --description '等用户视觉验收（看预览后加 accepted）' --force
+          gh label create accepted -R "$REPO" --color 0E8A16 --description '用户已确认画面，可以合并' --force
+          node scripts/devloop/accept.mjs report --pr "${{ inputs.pr }}" --head "${{ inputs.head }}" --judge judge/judge.json \
+            --preview "${{ needs.preview.outputs.url }}" --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.run }}"

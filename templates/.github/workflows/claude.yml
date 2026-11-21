@@ -138,7 +138,9 @@ jobs:
               命中 docs/DEVLOOP.md 第五节任一停止条件或信息不足 → outcome 写 needs-user，body.md 写原因，不改代码。
               否则实现需求并为新增或改动的逻辑写测试，本地 commit；body.md 写明改了什么、怎么验证、哪些是提案值，末尾 `Closes #${{ github.event.issue.number || inputs.pr || inputs.issue }}`。
 
-            fix 模式：用 `gh pr view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --comments` 读 PR，以最新一条“执行者：GPT”评论为准。
+            fix 模式：用 `gh pr view ${{ github.event.issue.number || inputs.pr || inputs.issue }} --comments` 读 PR，以最新一条“执行者：GPT”评论为准；
+              若最新的是“执行者：devloop（视觉验收）”且结论为未达标，就按其中的评分意见改画面（截图在评论里 Actions 链接的产物中，
+              风格目标见 docs/visual/STYLE.md），仍遵守项目的素材规则与性能预算（scripts/e2e/budgets.json）。
               逐条处理 blocker 与 major；minor 合理就改；不同意的给出依据，不要静默忽略。
               测试失败时用评论里 Actions 链接的运行号执行 `gh run view <运行号> --log-failed` 看日志；冲突时 `git merge origin/main` 解决。
               本地 commit；body.md 逐条列出每个意见的处理结果。
