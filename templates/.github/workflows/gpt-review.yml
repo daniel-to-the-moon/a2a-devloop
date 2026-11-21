@@ -1,0 +1,223 @@
+# 云端 PR 审核（可选）：取代审核方本机常驻，本机可留着兜底改工作流的 PR。见 docs/DEVLOOP.md。
+# 逻辑在 scripts/devloop/cloud.mjs，与本机 devloop.mjs 共用判定、合并、CI、签名标记模块（同一把签名密钥，审核记录互认）。
+#
+# 开关：仓库变量 CLOUD_REVIEW=on 才自动运行（定时扫描）；手动触发（workflow_dispatch）不受开关限制，用于验证。
+# 信任边界：不设 pull_request 入口——那会用 PR 分支上的工作流定义运行，PR 可改 YAML 提前读签名密钥或改写有写权限的步骤。
+#   定时任务只用默认分支（main）上的定义；手动触发只接受 ref=main（各任务 if 校验 github.ref）。
+# 分工：云端只审不改 .github/workflows/ 的 PR（GITHUB_TOKEN 无 workflows 权限）；这类 PR 由本机审核方处理。
+# 安全结构：
+#   select ：只读，选出一个要审的 PR；
+#   review ：只读，codex-action 以 :read-only 在 PR 代码检出上审核；再由 Claude（只读工具）独立审核，两份结论合并
+#            （任一方需修改即需修改，scripts/devloop/combine-review.mjs），产出结构化结论（不持有写权限与签名密钥）；
+#   decide ：有写权限，不运行模型、不执行 PR 代码：触发 CI（PR 合并到 main 后测试）、判定、合并或退回、评论，
+#            需修改时直接触发云端 Claude 修复，合并后触发部署（GITHUB_TOKEN 推送 main 不会触发 push 工作流）。
+# 整个工作流全局串行：网关限并发，且同一时刻只合并一个 PR。
+name: gpt-review
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('gpt-review PR#{0}', inputs.pr) || format('gpt-review {0}', github.event_name) }}
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: '只审这个 PR（留空则扫描全部 open PR）'
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: gpt-review
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  select:
+    # 只在 main 上的工作流定义里运行（手动触发时 --ref 必须是 main）
+    if: github.ref == 'refs/heads/main' && (vars.CLOUD_REVIEW == 'on' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      pr: ${{ steps.pick.outputs.pr }}
+      head: ${{ steps.pick.outputs.head }}
+      base: ${{ steps.pick.outputs.base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: scripts/devloop
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: 选出要审的 PR
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEVLOOP_MARKER_KEY: ${{ secrets.DEVLOOP_MARKER_KEY }}
+          ONLY: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          case "$ONLY" in '') ;; 0* | *[!0-9]*) echo "::error::PR 编号无效：$ONLY"; exit 1 ;; esac
+          if [ -n "$ONLY" ]; then node scripts/devloop/cloud.mjs select --pr "$ONLY"; else node scripts/devloop/cloud.mjs select; fi
+
+  review:
+    needs: select
+    if: github.ref == 'refs/heads/main' && needs.select.outputs.pr != ''
+    runs-on: ubuntu-latest
+    # GPT 与 Claude 先后各审一次
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      # 本次尝试上传的产物名（含 run_attempt）：重跑保留 run_id，固定名字可能下载到上一次尝试的旧结论
+      artifact: ${{ steps.wrap.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: _main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ needs.select.outputs.pr }}/head
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 核对 PR 头部并取 main 历史（用于 diff）
+        env:
+          HEAD_SHA: ${{ needs.select.outputs.head }}
+        run: |
+          set -euo pipefail
+          test "$(git -C pr rev-parse HEAD)" = "$HEAD_SHA" || { echo "::error::PR 头部已变化"; exit 1; }
+          git -C pr fetch -q ../_main HEAD:refs/remotes/devloop/main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: 生成审核提示词
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEVLOOP_MARKER_KEY: ${{ secrets.DEVLOOP_MARKER_KEY }}
+        run: node _main/scripts/devloop/cloud.mjs prompt --pr "${{ needs.select.outputs.pr }}" --head "${{ needs.select.outputs.head }}" --base "${{ needs.select.outputs.base }}" --dir pr --out "$RUNNER_TEMP/prompt.md"
+      - name: GPT 审核
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13（标签指向的提交）
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          responses-api-endpoint: ${{ vars.GPT_RESPONSES_ENDPOINT }}
+          model: ${{ vars.GPT_MODEL }}
+          effort: high
+          permission-profile: ':read-only'
+          working-directory: pr
+          prompt-file: ${{ runner.temp }}/prompt.md
+          output-schema-file: _main/scripts/devloop/review-schema.json
+          output-file: ${{ runner.temp }}/review.json
+      # 第二审核方 Claude（双评审：GPT 与 Claude 都通过才合并）。仓库变量 SECOND_REVIEW=off 可关闭，默认开启。
+      # 与 GPT 用同一份提示词（只改身份）和同一个 schema；不执行 PR 代码。
+      # 只给 Read / Glob / Grep，不给任何 Bash（`git log --output` 之类的前缀白名单仍能写文件，
+      # 可覆盖 _main 下随后执行的脚本或篡改 GPT 结论）。diff、提交记录由本步骤在启动 Claude 之前生成到 $RUNNER_TEMP/claude-ctx，Claude 只读。
+      # --setting-sources user + --strict-mcp-config：不加载 PR 里的 .claude/settings.json（钩子、权限）与 .mcp.json，
+      # 否则 PR 可借钩子在持有 API key 的环境里执行命令（用 2.1.318 实测：带钩子与 MCP 的仓库下均未触发，越权 Bash 被拒；升级版本后要重新实测）。
+      # 工具与设置来源的约束由 scripts/devloop/combine-review.test.mjs 读取本文件校验。
+      # 结论缺失或不合法时本任务失败，decide 按“审核未完成”处理（计入同一提交 3 次上限），不会只凭 GPT 一方放行。
+      - name: 安装 Claude Code（固定版本）
+        if: vars.SECOND_REVIEW != 'off'
+        run: npm install -g --no-audit --no-fund @anthropic-ai/claude-code@2.1.318
+      - name: Claude 审核
+        if: vars.SECOND_REVIEW != 'off'
+        working-directory: pr
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+          # 未设 CLAUDE_REVIEW_MODEL 时沿用执行者的 CLAUDE_MODEL；两个都没设则本步骤失败（按审核未完成处理）
+          MODEL: ${{ vars.CLAUDE_REVIEW_MODEL || vars.CLAUDE_MODEL }}
+          BASE_SHA: ${{ needs.select.outputs.base }}
+        run: |
+          set -euo pipefail
+          [ -n "$ANTHROPIC_BASE_URL" ] || unset ANTHROPIC_BASE_URL
+          [ -n "$MODEL" ] || { echo "::error::未设仓库变量 CLAUDE_REVIEW_MODEL 或 CLAUDE_MODEL"; exit 1; }
+          CTX="$RUNNER_TEMP/claude-ctx"
+          mkdir -p "$CTX"
+          git diff --stat "$BASE_SHA...HEAD" > "$CTX/stat.txt"
+          git diff "$BASE_SHA...HEAD" > "$CTX/diff.patch"
+          git log --no-color "$BASE_SHA..HEAD" > "$CTX/log.txt"
+          node ../_main/scripts/devloop/combine-review.mjs prompt --in "$RUNNER_TEMP/prompt.md" --ctx "$CTX" --out "$RUNNER_TEMP/claude-prompt.md"
+          claude -p "$(cat "$RUNNER_TEMP/claude-prompt.md")" \
+            --model "$MODEL" \
+            --max-turns 80 \
+            --output-format json \
+            --json-schema "$(cat ../_main/scripts/devloop/review-schema.json)" \
+            --add-dir "$CTX" \
+            --allowedTools "Read,Glob,Grep" \
+            --disallowedTools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task" \
+            --setting-sources user \
+            --strict-mcp-config \
+            < /dev/null > "$RUNNER_TEMP/claude-result.json"
+      - name: 合并两方结论
+        if: vars.SECOND_REVIEW != 'off'
+        run: |
+          set -euo pipefail
+          node _main/scripts/devloop/combine-review.mjs merge --gpt "$RUNNER_TEMP/review.json" --claude "$RUNNER_TEMP/claude-result.json" --out "$RUNNER_TEMP/combined.json"
+          mv "$RUNNER_TEMP/combined.json" "$RUNNER_TEMP/review.json"
+      - name: 封装结论与元数据（工作流写入，不经模型）
+        id: wrap
+        env:
+          PR: ${{ needs.select.outputs.pr }}
+          HEAD_SHA: ${{ needs.select.outputs.head }}
+          BASE_SHA: ${{ needs.select.outputs.base }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$RUNNER_TEMP/review.json" "$RUNNER_TEMP/out/review.json"
+          jq -n --arg pr "$PR" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '{pr: $pr, head: $head, base: $base, run_id: $run, run_attempt: $attempt}' > "$RUNNER_TEMP/out/meta.json"
+          echo "artifact=gpt-review-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.wrap.outputs.artifact }}
+          path: ${{ runner.temp }}/out/
+          retention-days: 7
+
+  decide:
+    needs: [select, review]
+    # GPT 审核失败也要判定（记为基础设施问题，受重试上限约束），不能无声跳过
+    if: always() && github.ref == 'refs/heads/main' && needs.select.result == 'success' && needs.select.outputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # 只在 review 任务本次成功时下载它报告的那个产物；失败时不下载，decide 按基础设施问题处理
+      - uses: actions/download-artifact@v4
+        if: needs.review.result == 'success' && needs.review.outputs.artifact != ''
+        continue-on-error: true
+        with:
+          name: ${{ needs.review.outputs.artifact }}
+          path: review
+      - name: 测试、判定、合并或退回
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEVLOOP_MARKER_KEY: ${{ secrets.DEVLOOP_MARKER_KEY }}
+          GPT_MODEL: ${{ vars.GPT_MODEL }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          # 轮次用满后的处理（用户自选）：needs-user（默认，停下等用户）| auto（收敛则追加轮次，否则无 blocker 即合并并把遗留意见转 issue）
+          ROUND_LIMIT_MODE: ${{ vars.ROUND_LIMIT_MODE }}
+        run: node scripts/devloop/cloud.mjs decide --pr "${{ needs.select.outputs.pr }}" --head "${{ needs.select.outputs.head }}" --base "${{ needs.select.outputs.base }}" --review-result "$REVIEW_RESULT" --review review/review.json --meta review/meta.json

@@ -30,6 +30,10 @@
 | `scripts/devloop/gitops.mjs` | — | 合并推送、租约删分支、CI 运行匹配、端口进程锁 |
 | `scripts/devloop/ci.mjs` | — | 触发与等待 CI；任何查询异常都转为“基础设施问题” |
 | `scripts/devloop/ctx.sh`、`publish.sh` | GitHub Actions（取 main 版本） | claude.yml 的判断与发布逻辑 |
+| `.github/workflows/gpt-review.yml` + `cloud.mjs` | GitHub Actions（可选） | 云端审核：取代本机常驻；GPT + Claude 双评审，`decide` 触发 CI、合并或退回 |
+| `scripts/devloop/combine-review.mjs` | GitHub Actions（可选） | 合并两方结论：任一方需修改即需修改 |
+| `scripts/e2e/smoke.mjs`（由 `smoke.example.mjs` 改写） | CI（可选） | 浏览器冒烟验收：失败即不合并、不发布 |
+| `scripts/devloop/pages.sh`、`d1-retention.sh` + `analytics-retention.yml`、`functions/` | GitHub Actions（可选） | 发布到 Cloudflare Pages、预览 / 正式分离、匿名统计（`docs/LAUNCH.md`、`docs/ANALYTICS.md`） |
 | `*.test.mjs` | CI | `node --test scripts/devloop/*.test.mjs` |
 
 ## 三、角色

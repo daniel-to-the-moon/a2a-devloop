@@ -7,6 +7,9 @@
 - **CI** 在一次性 runner 上测试“PR 合并到当前默认分支之后”的代码
 - 开关：仓库变量 `DEVLOOP_PAUSED=true` 全部暂停；`DEVLOOP_REVIEWER=off` 只用云端执行者、不响应审核评论
 - 可选：**GPT 云端参与讨论**——讨论 issue 打上 `discussion` / `proposal` 标签自动评审，评论里 `@gpt` 点名再回答
+- 可选：**云端双评审**——GPT（codex-action）和 Claude 各审一次，两方都通过才合并，不需要用户电脑在线
+- 可选：**浏览器冒烟验收**——CI 用真实 Chromium 跑一遍核心路径，失败不合并、不发布
+- 可选：**合并即发布到 Cloudflare Pages**——预览地址受 Access 保护，正式地址由用户用仓库变量 `PAGES_PUBLIC=true` 决定何时公开；`ANALYTICS=on` 时连同自建匿名统计（D1，自动建库）一起发布
 - 审核与测试都通过即自动合并；卡住时打 `needs-user` 标签等人
 
 用户只提 issue、只做必须由人做的决定，agent 之间不需要人传话。
