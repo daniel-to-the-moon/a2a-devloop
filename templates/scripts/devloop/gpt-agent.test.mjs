@@ -89,6 +89,21 @@ test('withDiff：把 git diff 那行换成预生成的改动附在末尾，过�
   const out = withDiff(p, { stat: 'S', diff: 'D', log: 'L' });
   assert.doesNotMatch(out, /用 `git diff/);
   assert.match(out, /附在本提示词末尾[\s\S]*## 完整 diff\n\n```diff\nD\n```$/);
-  assert.match(withDiff(p, { diff: 'x'.repeat(200_001) }), /过长/);
+  assert.match(withDiff(p, { diff: 'x'.repeat(200_001) }), /过长[\s\S]*read_diff 从 offset=200000/);
   assert.throws(() => withDiff('没有那一行', {}), /找不到/);
+});
+
+test('runAgent：给了 diffText 就多一个只读、可分页的 read_diff 工具，能读到截断之后的部分', async () => {
+  const root = repo();
+  const diff = 'a'.repeat(130_000) + 'TAIL';
+  const bodies = [];
+  const replies = [
+    { id: 'r1', output: [{ type: 'function_call', call_id: 'c1', name: 'read_diff', arguments: '{"offset":120000}' }] },
+    { id: 'r2', output: [{ type: 'function_call', call_id: 'c2', name: 'finish', arguments: '{"verdict":"approve"}' }] },
+  ];
+  const fetchImpl = async (u, init) => { bodies.push(JSON.parse(init.body)); return { ok: true, status: 200, text: async () => JSON.stringify(replies[bodies.length - 1]) }; };
+  await runAgent({ mode: 'read', root, prompt: 'P', schema: {}, env: { MODEL: 'm' }, diffText: diff, fetchImpl });
+  assert.ok(bodies[0].tools.some((t) => t.name === 'read_diff'));
+  assert.ok(!bodies[0].tools.some((t) => t.name === 'write_file'));
+  assert.match(bodies[1].input[0].output, /TAIL$/);
 });

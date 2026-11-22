@@ -378,13 +378,13 @@ test('codex.yml：执行代码的任务只读、GPT 经 main 上的 gpt-agent �
   // 运行的是 main 上的 gpt-agent.mjs（先从 _devloop 复制出来），不是待修分支上的
   assert.match(work, /cp _devloop\/scripts\/devloop\/gpt-agent\.mjs "\$RUNNER_TEMP\/gpt-agent\.mjs"/);
   assert.match(work, /node "\$RUNNER_TEMP\/gpt-agent\.mjs" --mode write /);
-  const agent = work.indexOf('gpt-agent.mjs" --mode write');
-  assert.ok(work.indexOf('npm ci') < agent, '依赖在模型之前装好');
-  assert.ok(agent < work.lastIndexOf('npm test && npm run build'), '模型之后由工作流再跑测试把关');
-  // 持有 key 的只有两个模型步骤；跑测试的步骤不持有 key
+  // 仓库代码（npm ci、测试）只能在唯一一个持有 key 的模型步骤之后运行（Codex 审核 #76 P1）
   const steps = work.split('\n      - ');
-  for (const st of steps.filter((x) => /npm test/.test(x))) assert.doesNotMatch(st, /OPENAI_API_KEY/, st.split('\n')[0]);
-  assert.equal(steps.filter((x) => /OPENAI_API_KEY/.test(x)).length, 2);
+  const keyed = steps.map((x, i) => (/OPENAI_API_KEY/.test(x) ? i : -1)).filter((i) => i >= 0);
+  assert.equal(keyed.length, 1, '只有一个步骤持有 key');
+  const firstRepoCode = steps.findIndex((x) => /npm ci --no-audit|\(npm test && npm run build\)/.test(x));
+  assert.ok(firstRepoCode > keyed[0] && keyed[0] >= 0, '仓库代码在模型之后才运行');
+  assert.match(steps[keyed[0]], /gpt-agent\.mjs" --mode write/);
   assert.match(work, /\^\\\.github\/workflows\//, '改了工作流的结果不发布');
   assert.match(work, /PREFIX: codex\n {10}LABEL: gpt-design/);
   assert.doesNotMatch(pub, /codex-action|claude-code-action|npm /);

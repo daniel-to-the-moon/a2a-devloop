@@ -7,8 +7,8 @@
 #
 # 安全结构与 claude.yml 相同：
 #   work    ：只读令牌。GPT 只能经 gpt-agent.mjs 的工具读写工作区文件（不能执行命令，不能碰 .git / .github/workflows）；
-#             测试与构建由工作流在之后、不持有 OPENAI_API_KEY 的步骤里跑，不通过就把日志交回 GPT 再修一轮；
-#             最后由工作流（不经模型）提交、再跑一次测试把关、打成 git bundle 上传。
+#             仓库代码（npm ci、测试）一律在模型步骤之后运行，之后没有持有 OPENAI_API_KEY 的步骤；
+#             由工作流（不经模型）提交、跑测试把关、打成 git bundle 上传。测试不通过 → needs-user，日志写进评论。
 #   不用 openai/codex-action：官方 key 所在组织被拒（codex_byok_restricted_by_api_credit_promo，camp-empire 2026-11-22 实测），Responses API 正常。
 #   publish ：有写权限，但不检出、不执行仓库代码；只把 bundle 推到 codex/* 分支并开 PR 或评论（publish.sh，PREFIX=codex）。
 name: codex
@@ -90,9 +90,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # 依赖在模型之前装好（本步不持有 key），供后面把关步骤跑测试
-      - name: 安装依赖
-        run: if [ -f package.json ]; then npm ci --no-audit --no-fund; fi
       # 模型没有 GitHub 令牌：issue / PR 全文与审核意见在这里取好，并进提示词
       - name: 取任务上下文
         env:
@@ -124,7 +121,7 @@ jobs:
           {
             echo "你是本仓库的主设计与实现者 GPT（devloop 循环，见 docs/DEVLOOP.md）。另一位执行者是 Claude；你写的代码由 Claude 独立审核，你不审自己的代码。"
             echo "你只能用给你的工具读写仓库文件（list_dir / read_file / search / write_file / delete_file），不能运行命令、不能联网、不能提交。"
-            echo "你调用 finish 之后，工作流会跑 npm test 与 npm run build；不通过会把日志交回给你再修一次，仍不通过就不发布。"
+            echo "你调用 finish 之后，工作流会跑 npm test 与 npm run build，不通过就不发布（你不能运行测试，所以改动前要读懂现有测试与调用方）。"
             echo ""
             echo "模式：$MODE；编号：#$N。"
             echo ""
@@ -151,26 +148,11 @@ jobs:
           GPT_RESPONSES_ENDPOINT: ${{ vars.GPT_RESPONSES_ENDPOINT }}
           MODEL: ${{ vars.GPT_DESIGN_MODEL || vars.GPT_MODEL }}
         run: node "$RUNNER_TEMP/gpt-agent.mjs" --mode write --root . --prompt "$RUNNER_TEMP/prompt.md" --schema "$RUNNER_TEMP/codex-result.schema.json" --out "$RUNNER_TEMP/codex-result.json"
-      # 不持有 key：跑一次测试与构建，不通过就把日志交回 GPT 再修一轮
-      - name: 把关（第 1 次）
-        id: gate1
-        if: steps.codex.outcome == 'success'
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          [ -f package.json ] || exit 0
-          [ "$(jq -r .outcome "$RUNNER_TEMP/codex-result.json")" = pr ] || exit 0
-          (npm test && npm run build) 2>&1 | tail -n 200 > "$RUNNER_TEMP/gate1.log"
-      - name: GPT 按把关日志再修
-        id: codex2
-        if: steps.gate1.outcome == 'failure'
-        continue-on-error: true
-        timeout-minutes: 45
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          GPT_RESPONSES_ENDPOINT: ${{ vars.GPT_RESPONSES_ENDPOINT }}
-          MODEL: ${{ vars.GPT_DESIGN_MODEL || vars.GPT_MODEL }}
-        run: node "$RUNNER_TEMP/gpt-agent.mjs" --mode write --root . --prompt "$RUNNER_TEMP/prompt.md" --feedback "$RUNNER_TEMP/gate1.log" --schema "$RUNNER_TEMP/codex-result.schema.json" --out "$RUNNER_TEMP/codex-result.json"
+      # 仓库代码（npm ci 的安装脚本、测试）只在模型步骤之后运行：之后不再有持有 key 的步骤，
+      # 仓库代码改不了已经跑完的 gpt-agent，也拿不到 key（Codex 审核 #76 P1：测试若在持有 key 的步骤之前运行，可篡改 $RUNNER_TEMP 里的脚本）
+      - name: 安装依赖
+        if: always() && steps.ctx.outcome == 'success'
+        run: if [ -f package.json ]; then npm ci --no-audit --no-fund; fi
       # 以下不经模型：按结果提交、跑测试把关、打包。任何一步不满足都转 needs-user（publish 会 @ 负责人）
       - name: 提交并把关
         if: always() && steps.ctx.outcome == 'success'
@@ -178,7 +160,7 @@ jobs:
           OUT: ${{ runner.temp }}/devloop
           START: ${{ steps.start.outputs.start }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CODEX_OUTCOME: ${{ steps.codex2.outcome == 'skipped' && steps.codex.outcome || steps.codex2.outcome }}
+          CODEX_OUTCOME: ${{ steps.codex.outcome }}
           RESULT: ${{ runner.temp }}/codex-result.json
           N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
         run: |

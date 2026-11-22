@@ -156,8 +156,18 @@ export function endpoint(env) {
  * 函数调用循环。finish 的参数即结果；没调 finish 就用完轮次 / 时限 → 抛错（工作流转 needs-user）。
  * fetchImpl / now 便于测试。
  */
-export async function runAgent({ mode, root, prompt, schema, env, fetchImpl = fetch, maxTurns = 80, deadlineMs = 60 * 60_000, now = Date.now, log = () => {} }) {
+export async function runAgent({ mode, root, prompt, schema, env, diffText = null, fetchImpl = fetch, maxTurns = 80, deadlineMs = 60 * 60_000, now = Date.now, log = () => {} }) {
   const { tools, changed } = makeTools(root, mode);
+  // 审核：完整 diff 只读、可分页（提示词里过长会截断；仓库检出里看不到删除的文件和行，Codex 审核 #76 P2）
+  if (diffText != null)
+    tools.read_diff = {
+      description: `分页读取本 PR 的完整 diff（工作流预生成，共 ${diffText.length} 字符），单次最多 ${MAX_READ} 字符。`,
+      parameters: { type: 'object', properties: { offset: { type: 'integer' } }, required: ['offset'], additionalProperties: false },
+      run: ({ offset = 0 }) => {
+        const part = diffText.slice(offset, offset + MAX_READ);
+        return offset + MAX_READ < diffText.length ? `${part}\n…（未完：下次从 offset=${offset + MAX_READ} 继续）` : part || '（已到末尾）';
+      },
+    };
   const defs = [
     ...Object.entries(tools).map(([name, t]) => ({ type: 'function', name, description: t.description, parameters: t.parameters, strict: false })),
     { type: 'function', name: 'finish', description: '完成任务时调用一次，参数就是最终结果。调用后不再有后续。', parameters: schema, strict: false },
@@ -244,7 +254,7 @@ export function withDiff(prompt, { stat = '', diff = '', log = '' }) {
   if (i < 0) throw new Error('审核提示词里找不到“用 `git diff …` 查看完整改动”这一行');
   lines[i] = '完整改动已由工作流预先生成，附在本提示词末尾（你不能运行命令）；需要上下文时用 read_file / search 阅读 PR 头部提交的检出。测试与构建由 CI 在合并后的代码上另行执行，你只需审代码。审完调用 finish 给出结论。';
   const cut = diff.length > MAX_DIFF;
-  return [lines.join('\n'), '', '## 提交记录', '', '```', log.trim(), '```', '', '## 改动统计', '', '```', stat.trim(), '```', '', `## 完整 diff${cut ? `（过长，只附前 ${MAX_DIFF} 字符；其余文件用 read_file 读）` : ''}`, '', '```diff', cut ? diff.slice(0, MAX_DIFF) : diff, '```'].join('\n');
+  return [lines.join('\n'), '', '## 提交记录', '', '```', log.trim(), '```', '', '## 改动统计', '', '```', stat.trim(), '```', '', `## 完整 diff${cut ? `（过长，这里只附前 ${MAX_DIFF} 字符；必须用 read_diff 从 offset=${MAX_DIFF} 读完剩下的部分再下结论）` : ''}`, '', '```diff', cut ? diff.slice(0, MAX_DIFF) : diff, '```'].join('\n');
 }
 
 function arg(name) {
@@ -259,9 +269,10 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   const fb = arg('feedback');
   if (fb && existsSync(fb)) prompt += `\n\n## 上一轮改动没有通过把关（npm test / npm run build），日志末尾如下。请在现有改动基础上修好，再调用 finish：\n\n\`\`\`\n${readFileSync(fb, 'utf8').slice(-12000)}\n\`\`\`\n`;
   const dd = arg('diff-dir');
-  if (dd) prompt = withDiff(prompt, Object.fromEntries(['stat', 'diff', 'log'].map((k) => [k, readFileSync(join(dd, k === 'diff' ? 'diff.patch' : `${k}.txt`), 'utf8')])));
+  const ctx = dd ? Object.fromEntries(['stat', 'diff', 'log'].map((k) => [k, readFileSync(join(dd, k === 'diff' ? 'diff.patch' : `${k}.txt`), 'utf8')])) : null;
+  if (ctx) prompt = withDiff(prompt, ctx);
   const schema = JSON.parse(readFileSync(arg('schema'), 'utf8'));
-  const r = await runAgent({ mode, root: arg('root'), prompt, schema, env: process.env, log: (m) => console.log(m) });
+  const r = await runAgent({ mode, root: arg('root'), prompt, schema, env: process.env, diffText: ctx?.diff ?? null, log: (m) => console.log(m) });
   writeFileSync(arg('out'), JSON.stringify(r.result, null, 2));
   console.log(`完成：${r.turns} 轮；改动文件：${r.changed.join('、') || '无'}；用量：${JSON.stringify(r.usage)}`);
 }
