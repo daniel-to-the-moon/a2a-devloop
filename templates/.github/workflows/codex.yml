@@ -50,6 +50,9 @@ jobs:
       branch: ${{ steps.ctx.outputs.branch }}
       start: ${{ steps.start.outputs.start }}
       outcome: ${{ steps.take.outputs.outcome }}
+      head: ${{ steps.take.outputs.head }}
+      # 产物名带上 work 自己的尝试号：重跑时 gate / publish 只取这一次 work 上传的产物，不会取到旧尝试的
+      attempt: ${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -179,10 +182,11 @@ jobs:
           git bundle create "$OUT/work.bundle" "$START..HEAD" HEAD
           echo pr > "$OUT/outcome"
           echo outcome=pr >> "$GITHUB_OUTPUT"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: devloop-${{ github.run_id }}
+          name: devloop-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/devloop
           retention-days: 7
 
@@ -203,10 +207,14 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          name: devloop-${{ github.run_id }}
+          name: devloop-${{ github.run_id }}-${{ needs.work.outputs.attempt }}
           path: ${{ runner.temp }}/devloop
       - name: 取出 GPT 的提交
-        run: git fetch -q "$RUNNER_TEMP/devloop/work.bundle" HEAD && git checkout -q --detach FETCH_HEAD
+        env:
+          HEAD_SHA: ${{ needs.work.outputs.head }}
+        run: |
+          git fetch -q "$RUNNER_TEMP/devloop/work.bundle" HEAD && git checkout -q --detach FETCH_HEAD
+          [ -n "$HEAD_SHA" ] && [ "$(git rev-parse HEAD)" = "$HEAD_SHA" ] || { echo "产物里的提交与 work 输出不一致"; exit 1; }
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -218,7 +226,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: gate-${{ github.run_id }}
+          name: gate-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/gate
           retention-days: 7
 
@@ -235,26 +243,36 @@ jobs:
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: devloop-${{ github.run_id }}
+          name: devloop-${{ github.run_id }}-${{ needs.work.outputs.attempt }}
           path: out
       - uses: actions/download-artifact@v4
         if: needs.gate.result == 'failure'
         continue-on-error: true
         with:
-          name: gate-${{ github.run_id }}
+          name: gate-${{ github.run_id }}-${{ github.run_attempt }}
           path: gate
-      # GPT 结论是 pr 但把关没通过（或没跑完）→ 不发布，转 needs-user 并附日志末尾
+      # 只有“work 成功、job 输出与产物里的结论一致、结论为 pr、bundle 的提交就是 work 输出的那个、gate 成功”才保留 bundle；
+      # 任何缺失或不一致都转 needs-user 并丢掉 bundle（GPT 审核 #76：重跑时可能取到旧尝试的产物）
       - name: 合并把关结果
         env:
           GATE: ${{ needs.gate.result }}
+          WORK_RESULT: ${{ needs.work.result }}
           WORK_OUTCOME: ${{ needs.work.outputs.outcome }}
+          WORK_HEAD: ${{ needs.work.outputs.head }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ "$WORK_OUTCOME" = pr ] && [ "$GATE" != success ]; then
-            TAIL="$(tail -n 40 gate/gate.log 2>/dev/null || echo '（没有日志）')"
-            printf '执行者：GPT（devloop 主设，codex.yml）\n\nGPT 的改动没有通过安装依赖 / 测试 / 构建（把关结果：%s），未发布。日志末尾：\n\n```\n%s\n```\n\n运行记录：%s\n' "$GATE" "$TAIL" "$RUN_URL" > out/body.md
-            echo needs-user > out/outcome
+          mkdir -p out
+          stop() { printf '执行者：GPT（devloop 主设，codex.yml）\n\n%s\n\n运行记录：%s\n' "$1" "$RUN_URL" > out/body.md; echo needs-user > out/outcome; rm -f out/work.bundle; }
+          FILE_OUTCOME="$(cat out/outcome 2>/dev/null)"
+          if [ "$WORK_RESULT" != success ] || [ -z "$WORK_OUTCOME" ] || [ "$FILE_OUTCOME" != "$WORK_OUTCOME" ]; then
+            stop "work 的结论缺失或与产物不一致（job：${WORK_RESULT:-无}，输出：${WORK_OUTCOME:-无}，产物：${FILE_OUTCOME:-无}），未发布。"
+          elif [ "$WORK_OUTCOME" != pr ]; then
             rm -f out/work.bundle
+          elif [ "$GATE" != success ]; then
+            TAIL="$(tail -n 40 gate/gate.log 2>/dev/null || echo '（没有日志）')"
+            stop "$(printf 'GPT 的改动没有通过安装依赖 / 测试 / 构建（把关结果：%s），未发布。日志末尾：\n\n```\n%s\n```' "$GATE" "$TAIL")"
+          elif [ -z "$WORK_HEAD" ] || [ "$(git bundle list-heads out/work.bundle 2>/dev/null | awk '$2 == "HEAD" {print $1}')" != "$WORK_HEAD" ]; then
+            stop "产物里的提交与 work 输出的提交不一致，未发布。"
           fi
       - uses: actions/checkout@v4
         with:

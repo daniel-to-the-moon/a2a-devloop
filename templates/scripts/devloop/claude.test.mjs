@@ -396,7 +396,12 @@ test('codex.yml：执行代码的任务只读、GPT 经 main 上的 gpt-agent �
   assert.match(gate, /npm ci --no-audit --no-fund && npm test && npm run build/);
   // publish：把关没通过就转 needs-user，丢掉 bundle
   assert.match(pub, /needs: \[work, gate\]/);
-  assert.match(pub, /if \[ "\$WORK_OUTCOME" = pr \] && \[ "\$GATE" != success \]; then[\s\S]*echo needs-user > out\/outcome\n {12}rm -f out\/work\.bundle/);
+  assert.match(pub, /stop\(\) \{[^\n]*echo needs-user > out\/outcome; rm -f out\/work\.bundle; \}/);
+  // 产物绑定 work 的尝试号（重跑不取旧产物），gate 核对提交
+  assert.match(work, /name: devloop-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(gate, /name: devloop-\$\{\{ github\.run_id \}\}-\$\{\{ needs\.work\.outputs\.attempt \}\}/);
+  assert.match(pub, /name: devloop-\$\{\{ github\.run_id \}\}-\$\{\{ needs\.work\.outputs\.attempt \}\}/);
+  assert.match(gate, /"\$\(git rev-parse HEAD\)" = "\$HEAD_SHA" \] \|\| \{/);
   assert.ok(pub.indexOf('合并把关结果') < pub.indexOf('publish.sh'));
   assert.match(work, /\^\\\.github\/workflows\//, '改了工作流的结果不发布');
   assert.match(work, /PREFIX: codex\n {10}LABEL: gpt-design/);
@@ -405,29 +410,48 @@ test('codex.yml：执行代码的任务只读、GPT 经 main 上的 gpt-agent �
   assert.match(yml, /github\.event\.label\.name == 'gpt-design'/);
 });
 
-test('codex.yml publish「合并把关结果」：结论 pr 但把关失败 / 没跑完 → needs-user、附日志、丢 bundle；把关通过或结论本就 needs-user 则不动', () => {
+test('codex.yml publish「合并把关结果」：只有 work 成功、结论一致、为 pr、bundle 提交对得上、gate 成功才保留 bundle，其余一律 needs-user', () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/codex.yml'), 'utf8');
   const step = yml.slice(yml.indexOf('- name: 合并把关结果'));
-  const script = step.slice(step.indexOf('run: |\n') + 7).split('\n').filter((l, i, a) => a.slice(0, i + 1).every((x) => x.startsWith('          ') || x === '')).map((l) => l.slice(10)).join('\n');
-  const runIt = (env, log) => {
+  const body = step.slice(step.indexOf('run: |\n') + 7).split('\n');
+  const script = body.slice(0, body.findIndex((l) => l !== '' && !l.startsWith('          '))).map((l) => l.slice(10)).join('\n');
+  // 一个真实的 bundle，HEAD 是 sha
+  const src = mkdtempSync(join(tmpdir(), 'bsrc-'));
+  const git = (...a) => execFileSync('git', ['-C', src, ...a], { encoding: 'utf8' }).trim();
+  git('init', '-q');
+  git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'x');
+  const sha = git('rev-parse', 'HEAD');
+  git('bundle', 'create', join(src, 'b.bundle'), 'HEAD');
+  const runIt = (env, { file = env.WORK_OUTCOME, log } = {}) => {
     const d = mkdtempSync(join(tmpdir(), 'gate-'));
     mkdirSync(join(d, 'out'));
-    writeFileSync(join(d, 'out/outcome'), `${env.WORK_OUTCOME}\n`);
+    if (file !== null) writeFileSync(join(d, 'out/outcome'), `${file}\n`);
     writeFileSync(join(d, 'out/body.md'), 'GPT 的说明');
-    writeFileSync(join(d, 'out/work.bundle'), 'B');
+    writeFileSync(join(d, 'out/work.bundle'), readFileSync(join(src, 'b.bundle')));
     if (log) {
       mkdirSync(join(d, 'gate'));
       writeFileSync(join(d, 'gate/gate.log'), log);
     }
-    const r = spawnSync('bash', ['-c', script], { cwd: d, env: { ...process.env, RUN_URL: 'U', ...env }, encoding: 'utf8' });
+    const r = spawnSync('bash', ['-c', script], { cwd: d, env: { ...process.env, RUN_URL: 'U', WORK_RESULT: 'success', WORK_HEAD: sha, ...env }, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     return { outcome: readFileSync(join(d, 'out/outcome'), 'utf8').trim(), body: readFileSync(join(d, 'out/body.md'), 'utf8'), bundle: existsSync(join(d, 'out/work.bundle')) };
   };
-  const failed = runIt({ WORK_OUTCOME: 'pr', GATE: 'failure' }, 'npm ERR! 测试失败');
-  assert.equal(failed.outcome, 'needs-user');
-  assert.match(failed.body, /把关结果：failure[\s\S]*npm ERR! 测试失败/);
-  assert.equal(failed.bundle, false);
-  assert.equal(runIt({ WORK_OUTCOME: 'pr', GATE: 'cancelled' }).outcome, 'needs-user');
+  const needsUser = (r) => assert.ok(r.outcome === 'needs-user' && !r.bundle, JSON.stringify(r));
   assert.deepEqual(runIt({ WORK_OUTCOME: 'pr', GATE: 'success' }), { outcome: 'pr', body: 'GPT 的说明', bundle: true });
-  assert.equal(runIt({ WORK_OUTCOME: 'needs-user', GATE: 'skipped' }).outcome, 'needs-user');
+  const failed = runIt({ WORK_OUTCOME: 'pr', GATE: 'failure' }, { log: 'npm ERR! 测试失败' });
+  needsUser(failed);
+  assert.match(failed.body, /把关结果：failure[\s\S]*npm ERR! 测试失败/);
+  needsUser(runIt({ WORK_OUTCOME: 'pr', GATE: 'cancelled' }));
+  // 结论本就是 needs-user：保留说明，丢 bundle
+  const nu = runIt({ WORK_OUTCOME: 'needs-user', GATE: 'skipped' });
+  assert.deepEqual(nu, { outcome: 'needs-user', body: 'GPT 的说明', bundle: false });
+  // 重跑取到旧产物：产物写着 pr，本次 work 结论 needs-user、gate 跳过 → 不发布
+  needsUser(runIt({ WORK_OUTCOME: 'needs-user', GATE: 'skipped' }, { file: 'pr' }));
+  // work 失败 / 没有输出 / 没有产物
+  needsUser(runIt({ WORK_RESULT: 'failure', WORK_OUTCOME: 'pr', GATE: 'success' }));
+  needsUser(runIt({ WORK_OUTCOME: '', GATE: 'skipped' }, { file: 'pr' }));
+  needsUser(runIt({ WORK_OUTCOME: 'pr', GATE: 'success' }, { file: null }));
+  // bundle 的提交与 work 输出不一致
+  needsUser(runIt({ WORK_OUTCOME: 'pr', GATE: 'success', WORK_HEAD: '0'.repeat(40) }));
+  needsUser(runIt({ WORK_OUTCOME: 'pr', GATE: 'success', WORK_HEAD: '' }));
 });
