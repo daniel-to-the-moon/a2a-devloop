@@ -134,3 +134,36 @@ test('runAgent：给了 diffText 就多一个只读、可分页的 read_diff 工
   assert.ok(!bodies[0].tools.some((t) => t.name === 'write_file'));
   assert.match(bodies[1].input[0].output, /TAIL$/);
 });
+
+test('runAgent：429 / 5xx / 网络错误重试后成功；重试用尽报错；重试与退避都不越过总时限', async () => {
+  const root = repo();
+  const fin = { ok: true, status: 200, text: async () => JSON.stringify({ id: 'r', output: [{ type: 'function_call', call_id: 'c', name: 'finish', arguments: '{"ok":true}' }] }) };
+  const err = (status) => ({ ok: false, status, text: async () => '{"error":"x"}' });
+  const base = { mode: 'read', root, prompt: 'P', schema: {}, env: { MODEL: 'm' } };
+  // 重试后成功：一次 429、一次网络错误，第三次成功；退避时长按 15s / 20s 走假时钟
+  let t = 0;
+  const waits = [];
+  const seq1 = [() => err(429), () => { throw new TypeError('fetch failed'); }, () => fin];
+  let n = 0;
+  const r = await runAgent({ ...base, fetchImpl: async () => seq1[n++](), now: () => t, sleep: async (ms) => { waits.push(ms); t += ms; } });
+  assert.deepEqual(r.result, { ok: true });
+  assert.deepEqual(waits, [15_000, 20_000]);
+  // 重试用尽：三次 503
+  n = 0;
+  await assert.rejects(runAgent({ ...base, fetchImpl: async () => { n++; return err(503); }, now: () => 0, sleep: async () => {} }), /HTTP 503/);
+  assert.equal(n, 3);
+  // 请求期间时钟越过总时限：即便返回成功也不接受，也不再发第二次
+  t = 0;
+  n = 0;
+  await assert.rejects(runAgent({ ...base, deadlineMs: 1000, fetchImpl: async () => { n++; t = 1001; return err(500); }, now: () => t, sleep: async () => {} }), /超出总时限/);
+  assert.equal(n, 1);
+  t = 0;
+  await assert.rejects(runAgent({ ...base, deadlineMs: 1000, fetchImpl: async () => { t = 1001; return fin; }, now: () => t, sleep: async () => {} }), /超出总时限/);
+  // 剩余时间不够退避：直接报超时，不睡、不重试
+  t = 0;
+  n = 0;
+  const slept = [];
+  await assert.rejects(runAgent({ ...base, deadlineMs: 10_000, fetchImpl: async () => { n++; return err(502); }, now: () => t, sleep: async (ms) => slept.push(ms) }), /超出总时限/);
+  assert.equal(n, 1);
+  assert.deepEqual(slept, []);
+});

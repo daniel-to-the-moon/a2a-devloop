@@ -165,7 +165,7 @@ export function endpoint(env) {
  * 函数调用循环。finish 的参数即结果；没调 finish 就用完轮次 / 时限 → 抛错（工作流转 needs-user）。
  * fetchImpl / now 便于测试。
  */
-export async function runAgent({ mode, root, prompt, schema, env, diffText = null, fetchImpl = fetch, maxTurns = 80, deadlineMs = 60 * 60_000, now = Date.now, log = () => {} }) {
+export async function runAgent({ mode, root, prompt, schema, env, diffText = null, fetchImpl = fetch, maxTurns = 80, deadlineMs = 60 * 60_000, now = Date.now, sleep = (ms) => new Promise((res) => setTimeout(res, ms)), log = () => {} }) {
   const { tools, changed } = makeTools(root, mode);
   // 审核：完整 diff 只读、可分页（提示词里过长会截断；仓库检出里看不到删除的文件和行，Codex 审核 #76 P2）
   if (diffText != null)
@@ -188,7 +188,7 @@ export async function runAgent({ mode, root, prompt, schema, env, diffText = nul
   for (let turn = 1; turn <= maxTurns; turn++) {
     if (now() > deadline) throw new Error('超出总时限');
     const body = { model: env.MODEL, input, tools: defs, reasoning: { effort: env.EFFORT || 'high' }, ...(previous ? { previous_response_id: previous } : {}) };
-    const r = await call(fetchImpl, url, env, body, Math.max(1, deadline - now()));
+    const r = await call(fetchImpl, url, env, body, { deadline, now, sleep });
     previous = r.id;
     const calls = (r.output ?? []).filter((o) => o.type === 'function_call');
     if (!calls.length) {
@@ -223,31 +223,44 @@ export async function runAgent({ mode, root, prompt, schema, env, diffText = nul
   throw new Error(`${maxTurns} 轮内没有调用 finish`);
 }
 
-async function call(fetchImpl, url, env, body, timeoutMs) {
+/**
+ * 一次模型请求，网络错误 / 429 / 5xx 最多试 3 次。每次请求、退避前与接受结果前都按绝对截止时间 deadline 检查，
+ * 请求超时与退避时长都不超过剩余时间（GPT 审核 #76：重试不能越过总时限）。
+ */
+async function call(fetchImpl, url, env, body, { deadline, now, sleep }) {
+  const left = () => deadline - now();
+  const over = () => new Error('超出总时限');
+  const backoff = async (ms) => {
+    if (left() <= ms) throw over();
+    await sleep(ms);
+  };
   for (let i = 1; ; i++) {
+    if (left() <= 0) throw over();
     let r, text;
     try {
       r = await fetchImpl(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${env.OPENAI_API_KEY ?? ''}` },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(Math.min(timeoutMs, 15 * 60_000)),
+        signal: AbortSignal.timeout(Math.max(1, Math.min(left(), 15 * 60_000))),
       });
       text = await r.text();
     } catch (e) {
+      if (left() <= 0) throw over();
       if (i < 3) {
-        await new Promise((res) => setTimeout(res, 10_000 * i));
+        await backoff(10_000 * i);
         continue;
       }
       throw new Error(`连不上 ${new URL(url).host}：${e.cause?.code || e.message}`);
     }
+    if (left() <= 0) throw over();
     let json = {};
     try {
       json = JSON.parse(text);
     } catch {}
     if (r.ok) return json;
     if ((r.status === 429 || r.status >= 500) && i < 3) {
-      await new Promise((res) => setTimeout(res, 15_000 * i));
+      await backoff(15_000 * i);
       continue;
     }
     throw new Error(`HTTP ${r.status}：${JSON.stringify(json.error ?? text).slice(0, 300)}`);
