@@ -43,6 +43,15 @@ test('safePath / 工具：仓库内指向禁区的符号链接（含链接链）
   assert.throws(() => tools.search.run({ pattern: 'core', path: 'g' }));
   assert.equal(tools.search.run({ pattern: 'core|on: push|NM' }), '（无匹配）');
   assert.doesNotMatch(tools.list_dir.run({ path: '.' }), /node_modules/);
+  // 指向仓库根目录与 .github 父目录的链接：搜索与列目录都不能借道进入禁区
+  symlinkSync(root, join(root, 'self'));
+  symlinkSync(join(root, '.github'), join(root, 'gh'));
+  assert.equal(tools.search.run({ pattern: 'core|on: push|NM', path: 'self' }), '（无匹配）');
+  assert.equal(tools.search.run({ pattern: 'on: push', path: 'gh' }), '（无匹配）');
+  assert.match(tools.search.run({ pattern: '车灯', path: 'self' }), /^src\/a\.js:2:/);
+  assert.doesNotMatch(tools.list_dir.run({ path: 'self' }), /\.git\/|node_modules/);
+  assert.doesNotMatch(tools.list_dir.run({ path: 'gh' }), /workflows/);
+  for (const p of ['self/.git/config', 'gh/workflows/ci.yml', 'self/node_modules/pkg/i.js']) assert.throws(() => tools.read_file.run({ path: p }), p);
 });
 
 test('工具：read 模式没有写工具；search 跳过禁区；write_file / delete_file 记录改动', () => {

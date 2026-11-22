@@ -82,9 +82,11 @@ export function makeTools(root, mode) {
       parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
       run: ({ path }) => {
         const { abs, rel } = safePath(rootReal, path);
+        // 按真实路径过滤：经仓库内链接（如 alias -> .）列目录时，禁区同样不出现
+        const realRel = relative(rootReal, realpathSync(abs)).split(sep).join('/');
         return readdirSync(abs)
           .sort()
-          .filter((n) => !DENY.some((re) => re.test(rel === '.' ? n : `${rel}/${n}`)))
+          .filter((n) => !DENY.some((re) => re.test(realRel === '' ? n : `${realRel}/${n}`)))
           .map((n) => (statSync(join(abs, n)).isDirectory() ? `${n}/` : n))
           .join('\n') || '（空目录）';
       },
@@ -106,7 +108,8 @@ export function makeTools(root, mode) {
         const re = new RegExp(pattern);
         const { abs } = safePath(rootReal, path);
         const files = [];
-        if (statSync(abs).isDirectory()) walk(rootReal, abs, files, 5000);
+        // 从真实路径起遍历（walk 不跟随链接），这样递归访问到的每个文件都按真实路径查 DENY（GPT 审核 #76）
+        if (statSync(abs).isDirectory()) walk(rootReal, realpathSync(abs), files, 5000);
         else files.push({ abs, rel: relative(rootReal, abs).split(sep).join('/') });
         const hits = [];
         for (const f of files) {
