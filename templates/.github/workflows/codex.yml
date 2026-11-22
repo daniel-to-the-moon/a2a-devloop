@@ -151,6 +151,7 @@ jobs:
       # 仓库代码（npm ci 的安装脚本、测试）只在模型步骤之后运行：之后不再有持有 key 的步骤，
       # 仓库代码改不了已经跑完的 gpt-agent，也拿不到 key（Codex 审核 #76 P1：测试若在持有 key 的步骤之前运行，可篡改 $RUNNER_TEMP 里的脚本）
       - name: 安装依赖
+        id: install
         if: always() && steps.ctx.outcome == 'success'
         run: if [ -f package.json ]; then npm ci --no-audit --no-fund; fi
       # 以下不经模型：按结果提交、跑测试把关、打包。任何一步不满足都转 needs-user（publish 会 @ 负责人）
@@ -161,6 +162,7 @@ jobs:
           START: ${{ steps.start.outputs.start }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
           RESULT: ${{ runner.temp }}/codex-result.json
           N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
         run: |
@@ -168,6 +170,7 @@ jobs:
           WHO='执行者：GPT（devloop 主设，codex.yml）'
           stop() { printf '%s\n\n%s\n\n运行记录：%s\n' "$WHO" "$1" "$RUN_URL" > "$OUT/body.md"; echo needs-user > "$OUT/outcome"; exit 0; }
           [ "$CODEX_OUTCOME" = "success" ] || stop "GPT 这一步没有正常完成（结果：${CODEX_OUTCOME:-未运行}），自动循环在此停下。"
+          [ "$INSTALL_OUTCOME" = "success" ] || stop "安装依赖（npm ci）失败（结果：${INSTALL_OUTCOME:-未运行}），未发布；日志见运行记录。"
           jq -e '.outcome and .body' "$RESULT" >/dev/null 2>&1 || stop "GPT 没有给出合法的结果。"
           printf '%s\n\n%s\n' "$WHO" "$(jq -r .body "$RESULT")" > "$OUT/body.md"
           jq -r '.title // ""' "$RESULT" | head -c 120 > "$OUT/title.txt"

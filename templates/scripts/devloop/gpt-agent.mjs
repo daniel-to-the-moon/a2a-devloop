@@ -9,8 +9,7 @@
  *   write：主设实现 / 修复（codex.yml）。工具：list_dir / read_file / search / write_file / delete_file / finish。
  *   read ：代码审核（gpt-review.yml）。工具：list_dir / read_file / search / finish（不能写）。
  * 模型只能读写 --root 之下的文件；拒绝 .git、node_modules、.github/workflows（发布令牌推不上去）与越界路径（含符号链接）。
- * 本脚本不执行仓库代码，也不给模型任何命令执行能力：测试与构建由工作流在之后、不持有 key 的步骤里运行，
- * 不通过时把日志交回本脚本再修一轮（--feedback）。
+ * 本脚本不执行仓库代码，也不给模型任何命令执行能力：依赖安装、测试与构建由工作流在之后、不持有 key 的步骤里运行。
  * finish 的参数就是结果（schema 由 --schema 给出），写到 --out。
  *
  * 用法：node gpt-agent.mjs --mode write|read --root DIR --prompt FILE --schema FILE --out FILE [--feedback FILE] [--diff-dir DIR]
@@ -40,11 +39,18 @@ export function safePath(root, p, { forWrite = false } = {}) {
     if (!existsSync(cur) && !isLink(cur)) break;
     if (isLink(cur)) {
       if (forWrite) throw new Error(`不允许经符号链接写入：${rel}`);
-      const real = realpathSync(cur);
-      if (real !== rootReal && !real.startsWith(rootReal + sep)) throw new Error(`符号链接指向仓库外：${rel}`);
+      checkReal(rootReal, realpathSync(cur), rel);
     }
   }
+  // 最终目标（若存在）也按真实路径再查一遍禁区：仓库内的链接（如 alias -> .git）不能绕过 DENY
+  if (existsSync(abs)) checkReal(rootReal, realpathSync(abs), rel);
   return { abs, rel: rel || '.' };
+}
+
+function checkReal(rootReal, real, rel) {
+  if (real !== rootReal && !real.startsWith(rootReal + sep)) throw new Error(`符号链接指向仓库外：${rel}`);
+  const realRel = relative(rootReal, real).split(sep).join('/');
+  if (DENY.some((re) => re.test(realRel))) throw new Error(`不允许访问：${rel}（实际指向 ${realRel}）`);
 }
 
 function isLink(p) {

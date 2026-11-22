@@ -27,6 +27,24 @@ test('safePath：越界、.git、workflows、node_modules、指向仓库外的�
   assert.equal(safePath(root, 'src/new/b.js', { forWrite: true }).rel, 'src/new/b.js');
 });
 
+test('safePath / 工具：仓库内指向禁区的符号链接（含链接链）不能绕过 DENY', () => {
+  const root = repo();
+  mkdirSync(join(root, 'node_modules/pkg'), { recursive: true });
+  writeFileSync(join(root, 'node_modules/pkg/i.js'), 'NM');
+  symlinkSync(join(root, '.git'), join(root, 'g'));
+  symlinkSync('g', join(root, 'g2'));
+  symlinkSync(join(root, '.github/workflows'), join(root, 'wf'));
+  symlinkSync(join(root, 'node_modules'), join(root, 'nm'));
+  symlinkSync(join(root, '.git/config'), join(root, 'src/cfg'));
+  for (const p of ['g', 'g/config', 'g2/config', 'wf/ci.yml', 'nm/pkg/i.js', 'src/cfg']) assert.throws(() => safePath(root, p), /不允许访问/, p);
+  const { tools } = makeTools(root, 'read');
+  assert.throws(() => tools.read_file.run({ path: 'g2/config' }));
+  assert.throws(() => tools.list_dir.run({ path: 'wf' }));
+  assert.throws(() => tools.search.run({ pattern: 'core', path: 'g' }));
+  assert.equal(tools.search.run({ pattern: 'core|on: push|NM' }), '（无匹配）');
+  assert.doesNotMatch(tools.list_dir.run({ path: '.' }), /node_modules/);
+});
+
 test('工具：read 模式没有写工具；search 跳过禁区；write_file / delete_file 记录改动', () => {
   const root = repo();
   assert.deepEqual(Object.keys(makeTools(root, 'read').tools).sort(), ['list_dir', 'read_file', 'search']);

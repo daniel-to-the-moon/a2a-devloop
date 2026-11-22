@@ -385,6 +385,11 @@ test('codex.yml：执行代码的任务只读、GPT 经 main 上的 gpt-agent �
   const firstRepoCode = steps.findIndex((x) => /npm ci --no-audit|\(npm test && npm run build\)/.test(x));
   assert.ok(firstRepoCode > keyed[0] && keyed[0] >= 0, '仓库代码在模型之后才运行');
   assert.match(steps[keyed[0]], /gpt-agent\.mjs" --mode write/);
+  // 安装依赖失败也不能发布（GPT 审核 #76）：把关步骤检查 install 的 outcome，且在提交之前
+  assert.match(work, /name: 安装依赖\n {8}id: install\n/);
+  const gate = steps.find((x) => x.startsWith('name: 提交并把关'));
+  assert.match(gate, /INSTALL_OUTCOME: \$\{\{ steps\.install\.outcome \}\}/);
+  assert.ok(gate.indexOf('"$INSTALL_OUTCOME" = "success" ] || stop') >= 0 && gate.indexOf('"$INSTALL_OUTCOME"') < gate.indexOf('git commit'));
   assert.match(work, /\^\\\.github\/workflows\//, '改了工作流的结果不发布');
   assert.match(work, /PREFIX: codex\n {10}LABEL: gpt-design/);
   assert.doesNotMatch(pub, /codex-action|claude-code-action|npm /);
