@@ -116,18 +116,20 @@ test('select：没有可审的 PR 时输出空 pr；--pr 只看指定的那个',
   assert.doesNotMatch(r.log, /pr list/);
 });
 
-test('gpt-review.yml：review 只读且以 :read-only 运行 codex、不持有签名密钥；decide 不运行模型；全局串行；开关', { skip: optionalMissing('.github/workflows/gpt-review.yml') }, () => {
+test('gpt-review.yml：review 只读、GPT 以只读工具审核（gpt-agent read）、不持有签名密钥；decide 不运行模型；全局串行；开关', { skip: optionalMissing('.github/workflows/gpt-review.yml') }, () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/gpt-review.yml'), 'utf8');
   const job = (name) => yml.match(new RegExp(`^  ${name}:\\n((?:(?: {4,}.*)?\\n)*)`, 'm'))?.[1] ?? '';
   const [select, review, decide] = ['select', 'review', 'decide'].map(job);
   assert.ok(select && review && decide);
   for (const j of [select, review]) assert.doesNotMatch(j, /: write$/m);
-  assert.match(review, /uses: openai\/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 /);
-  assert.match(review, /permission-profile: ':read-only'/);
+  // GPT 审核：main 上的 gpt-agent.mjs、read 模式（只读工具），不经 codex-action
+  const gptStep = review.slice(review.indexOf('- name: GPT 审核'), review.indexOf('# 第二审核方 Claude'));
+  assert.match(gptStep, /node \.\.\/_main\/scripts\/devloop\/gpt-agent\.mjs --mode read /);
+  assert.doesNotMatch(review, /uses: openai\/codex-action/);
   assert.match(review, /persist-credentials: false/);
-  // 签名密钥只在 prompt 这一步（不在运行 codex 的那一步）出现
-  const codexStep = review.slice(review.indexOf('- name: GPT 审核'), review.indexOf('- uses: actions/upload-artifact'));
-  assert.doesNotMatch(codexStep, /DEVLOOP_MARKER_KEY/);
+  // 签名密钥只在 prompt 这一步（不在运行模型的步骤）出现
+  const modelSteps = review.slice(review.indexOf('- name: GPT 审核'), review.indexOf('- uses: actions/upload-artifact'));
+  assert.doesNotMatch(modelSteps, /DEVLOOP_MARKER_KEY/);
   assert.doesNotMatch(decide, /uses: openai\/codex-action/);
   assert.match(decide, /^ {6}contents: write$/m);
   assert.match(decide, /^ {6}actions: write$/m);

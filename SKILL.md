@@ -23,7 +23,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
    预览 *.<项目>.pages.dev 始终受 Access 保护；正式地址 PAGES_PUBLIC=true 才公开；ANALYTICS=on 连同 D1 匿名统计一起发布
 ```
 
-`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test templates/scripts/devloop/*.test.mjs` 173 项）。搭建时复制过去，再按项目替换占位符。
+`templates/` 里是一套完整、已测试的实现（Node 内置模块，无依赖；`node --test templates/scripts/devloop/*.test.mjs` 178 项）。搭建时复制过去，再按项目替换占位符。
 
 ## 零、适用场景（先判断该不该用这套）
 
@@ -217,6 +217,8 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 - **网关诊断要能自证**：Codex 只报 “Reconnecting / high demand”，Node fetch 只报 “fetch failed”，看不出是网关不通、key 无效还是模型不可用。审核前做一次短探测（只打 HTTP 状态与错误信息），评分脚本报出 `cause`（DNS / 证书 / 拒绝连接）；网络错误、429、5xx 有上限地退避重试，且全部重试共用一个小于任务时限的总时限。
 - **只读令牌用 `gh … --json`**：不带 `--json` 的 `gh pr view` 会查 statusCheckRollup，只读任务没有 checks 权限直接报错。
 - **修复撞车不算失败**：自动修复起跑后，分支被别人（人或另一会话）推了新提交，就作废本次修复、评论说明，不加 `needs-user`；审核方会审新头部。
+- **云端 GPT 不要绑死在 Codex 上**：OpenAI 官方 key 所在组织可能不允许 Codex 调用（`codex_byok_restricted_by_api_credit_promo`），而 Responses API 正常。模板用 `scripts/devloop/gpt-agent.mjs` 直接调 Responses API：写模式只给读写文件工具（路径限定在仓库内、拒绝 `.git` / `.github/workflows` / 越界符号链接），读模式只读；不给执行命令的工具，测试在不持有 key 的步骤里跑、失败日志交回再修一轮。模型按角色分：`GPT_MODEL`（审核）、`VISUAL_MODEL` / `GPT_DESIGN_MODEL`（视觉评分 / 主设）。
+- **端点变量要填 runner 连得到的地址**：`GPT_RESPONSES_ENDPOINT` 填完整的 `…/v1/responses`；不能填 `127.0.0.1` 本机预览，也要确认自建网关不拒 GitHub 机房 IP；不用网关就删掉这个变量。
 
 ## 三·五、本机与云端审核方并存：冲突与去重
 

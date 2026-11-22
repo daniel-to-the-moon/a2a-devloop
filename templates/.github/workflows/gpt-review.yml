@@ -7,7 +7,7 @@
 # 分工：云端只审不改 .github/workflows/ 的 PR（GITHUB_TOKEN 无 workflows 权限）；这类 PR 由本机审核方处理。
 # 安全结构：
 #   select ：只读，选出一个要审的 PR；
-#   review ：只读，codex-action 以 :read-only 在 PR 代码检出上审核；再由 Claude（只读工具）独立审核，两份结论合并
+#   review ：只读，GPT 经 gpt-agent.mjs（只读工具）在 PR 代码检出上审核；再由 Claude（只读工具）独立审核，两份结论合并
 #            （任一方需修改即需修改，scripts/devloop/combine-review.mjs），产出结构化结论（不持有写权限与签名密钥）；
 #   decide ：有写权限，不运行模型、不执行 PR 代码：触发 CI（PR 合并到 main 后测试）、判定、合并或退回、评论，
 #            需修改时直接触发云端 Claude 修复，合并后触发部署（GITHUB_TOKEN 推送 main 不会触发 push 工作流）。
@@ -71,7 +71,7 @@ jobs:
   review:
     needs: select
     if: github.ref == 'refs/heads/main' && needs.select.outputs.pr != ''
-    # codex-action 的 drop-sudo 在 ubuntu-26.04（ubuntu-latest）上失败（runner 不在 sudo 组），固定 24.04
+    # 固定镜像，避免 ubuntu-latest 升级带来的意外
     runs-on: ubuntu-24.04
     # GPT 与 Claude 先后各审一次
     timeout-minutes: 75
@@ -150,17 +150,24 @@ jobs:
       # 作者是 GPT 的 PR 不让 GPT 审（谁写的谁不审），只由下面的 Claude 审
       - name: GPT 审核
         if: needs.select.outputs.author != 'gpt'
-        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13（标签指向的提交）
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          responses-api-endpoint: ${{ vars.GPT_RESPONSES_ENDPOINT }}
-          model: ${{ vars.GPT_MODEL }}
-          effort: high
-          permission-profile: ':read-only'
-          working-directory: pr
-          prompt-file: ${{ runner.temp }}/prompt.md
-          output-schema-file: _main/scripts/devloop/review-schema.json
-          output-file: ${{ runner.temp }}/review.json
+        # 直接调 Responses API（scripts/devloop/gpt-agent.mjs，read 模式：只有读文件 / 搜索工具，不能写、不能执行命令）。
+        # 不用 openai/codex-action：官方 key 所在组织被拒 codex_byok_restricted_by_api_credit_promo（2026-11-22）。
+        # 运行的是 main 上的脚本（_main），PR 改不了它；diff 由本步骤先生成，并进提示词。
+        working-directory: pr
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GPT_RESPONSES_ENDPOINT: ${{ vars.GPT_RESPONSES_ENDPOINT }}
+          MODEL: ${{ vars.GPT_MODEL }}
+          BASE_SHA: ${{ needs.select.outputs.base }}
+        run: |
+          set -euo pipefail
+          CTX="$RUNNER_TEMP/gpt-ctx"
+          mkdir -p "$CTX"
+          git diff --stat "$BASE_SHA...HEAD" > "$CTX/stat.txt"
+          git diff "$BASE_SHA...HEAD" > "$CTX/diff.patch"
+          git log --no-color "$BASE_SHA..HEAD" > "$CTX/log.txt"
+          node ../_main/scripts/devloop/gpt-agent.mjs --mode read --root . --prompt "$RUNNER_TEMP/prompt.md" --diff-dir "$CTX" \
+            --schema ../_main/scripts/devloop/review-schema.json --out "$RUNNER_TEMP/review.json"
       # 第二审核方 Claude（双评审：GPT 与 Claude 都通过才合并）。仓库变量 SECOND_REVIEW=off 可关闭，默认开启。
       # 与 GPT 用同一份提示词（只改身份）和同一个 schema；不执行 PR 代码。
       # 只给 Read / Glob / Grep，不给任何 Bash（`git log --output` 之类的前缀白名单仍能写文件，
@@ -186,10 +193,10 @@ jobs:
           AUTHOR: ${{ needs.select.outputs.author }}
         run: |
           set -euo pipefail
+          [ -n "$MODEL" ] || { echo "::error::未设仓库变量 CLAUDE_REVIEW_MODEL 或 CLAUDE_MODEL"; exit 1; }
           [ -n "$ANTHROPIC_BASE_URL" ] || unset ANTHROPIC_BASE_URL
           [ -n "$ANTHROPIC_API_KEY" ] || unset ANTHROPIC_API_KEY
           [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || unset CLAUDE_CODE_OAUTH_TOKEN
-          [ -n "$MODEL" ] || { echo "::error::未设仓库变量 CLAUDE_REVIEW_MODEL 或 CLAUDE_MODEL"; exit 1; }
           CTX="$RUNNER_TEMP/claude-ctx"
           mkdir -p "$CTX"
           git diff --stat "$BASE_SHA...HEAD" > "$CTX/stat.txt"

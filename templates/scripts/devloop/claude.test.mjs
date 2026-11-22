@@ -367,16 +367,24 @@ test('codex.yml / claude.yml：读 issue 与 PR 只用 gh … --json（不带 --
   }
 });
 
-test('codex.yml：执行代码的任务只读、Codex 用 :workspace（无网络）且依赖先装好、固定 runner 镜像；发布任务不运行模型', () => {
+test('codex.yml：执行代码的任务只读、GPT 经 main 上的 gpt-agent 只改工作区、跑测试的步骤不持有 key、固定 runner 镜像；发布任务不运行模型', () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/codex.yml'), 'utf8');
   const work = yml.slice(yml.indexOf('\n  work:'), yml.indexOf('\n  publish:'));
   const pub = yml.slice(yml.indexOf('\n  publish:'));
   assert.match(work, /permissions:\n {6}contents: read\n {6}issues: read\n {6}pull-requests: read\n {6}actions: read\n/);
   assert.doesNotMatch(work, /: write/);
   assert.match(work, /runs-on: ubuntu-24\.04/);
-  assert.match(work, /permission-profile: ':workspace'/);
-  assert.ok(work.indexOf('npm ci') < work.indexOf('openai/codex-action'), '依赖在 Codex 之前装好');
-  assert.ok(work.indexOf('openai/codex-action') < work.indexOf('npm test && npm run build'), 'Codex 之后由工作流再跑测试把关');
+  assert.doesNotMatch(work, /uses: openai\/codex-action/);
+  // 运行的是 main 上的 gpt-agent.mjs（先从 _devloop 复制出来），不是待修分支上的
+  assert.match(work, /cp _devloop\/scripts\/devloop\/gpt-agent\.mjs "\$RUNNER_TEMP\/gpt-agent\.mjs"/);
+  assert.match(work, /node "\$RUNNER_TEMP\/gpt-agent\.mjs" --mode write /);
+  const agent = work.indexOf('gpt-agent.mjs" --mode write');
+  assert.ok(work.indexOf('npm ci') < agent, '依赖在模型之前装好');
+  assert.ok(agent < work.lastIndexOf('npm test && npm run build'), '模型之后由工作流再跑测试把关');
+  // 持有 key 的只有两个模型步骤；跑测试的步骤不持有 key
+  const steps = work.split('\n      - ');
+  for (const st of steps.filter((x) => /npm test/.test(x))) assert.doesNotMatch(st, /OPENAI_API_KEY/, st.split('\n')[0]);
+  assert.equal(steps.filter((x) => /OPENAI_API_KEY/.test(x)).length, 2);
   assert.match(work, /\^\\\.github\/workflows\//, '改了工作流的结果不发布');
   assert.match(work, /PREFIX: codex\n {10}LABEL: gpt-design/);
   assert.doesNotMatch(pub, /codex-action|claude-code-action|npm /);
