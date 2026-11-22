@@ -6,9 +6,10 @@
 # Agent 之间只通过 GitHub 协作：issue、PR、评论、标签、workflow_dispatch。不经浏览器 / 桌面客户端转告。
 #
 # 安全结构与 claude.yml 相同：
-#   work    ：只读令牌。GPT 只能经 gpt-agent.mjs 的工具读写工作区文件（不能执行命令，不能碰 .git / .github/workflows）；
-#             仓库代码（npm ci、测试）一律在模型步骤之后运行，之后没有持有 OPENAI_API_KEY 的步骤；
-#             由工作流（不经模型）提交、跑测试把关、打成 git bundle 上传。测试不通过 → needs-user，日志写进评论。
+#   work    ：只读令牌，不运行任何仓库代码。GPT 只能经 gpt-agent.mjs 的工具读写工作区文件（不能执行命令，不能碰 .git / .github/workflows）；
+#             由工作流（不经模型）当场消费结论、提交、打成 git bundle 上传。
+#   gate    ：只读令牌、没有 key。取出 bundle，安装依赖、跑测试与构建；仓库代码在这里运行，改不了 work 已定的结论。
+#             不通过 → publish 转 needs-user，日志写进评论。
 #   不用 openai/codex-action：官方 key 所在组织被拒（codex_byok_restricted_by_api_credit_promo，camp-empire 2026-11-22 实测），Responses API 正常。
 #   publish ：有写权限，但不检出、不执行仓库代码；只把 bundle 推到 codex/* 分支并开 PR 或评论（publish.sh，PREFIX=codex）。
 name: codex
@@ -48,6 +49,7 @@ jobs:
       mode: ${{ steps.ctx.outputs.mode }}
       branch: ${{ steps.ctx.outputs.branch }}
       start: ${{ steps.start.outputs.start }}
+      outcome: ${{ steps.take.outputs.outcome }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -148,44 +150,35 @@ jobs:
           GPT_RESPONSES_ENDPOINT: ${{ vars.GPT_RESPONSES_ENDPOINT }}
           MODEL: ${{ vars.GPT_DESIGN_MODEL || vars.GPT_MODEL }}
         run: node "$RUNNER_TEMP/gpt-agent.mjs" --mode write --root . --prompt "$RUNNER_TEMP/prompt.md" --schema "$RUNNER_TEMP/codex-result.schema.json" --out "$RUNNER_TEMP/codex-result.json"
-      # 仓库代码（npm ci 的安装脚本、测试）只在模型步骤之后运行：之后不再有持有 key 的步骤，
-      # 仓库代码改不了已经跑完的 gpt-agent，也拿不到 key（Codex 审核 #76 P1：测试若在持有 key 的步骤之前运行，可篡改 $RUNNER_TEMP 里的脚本）
-      - name: 安装依赖
-        id: install
-        if: always() && steps.ctx.outcome == 'success'
-        run: if [ -f package.json ]; then npm ci --no-audit --no-fund; fi
-      # 以下不经模型：按结果提交、跑测试把关、打包。任何一步不满足都转 needs-user（publish 会 @ 负责人）
-      - name: 提交并把关
+      # 以下不经模型、也不运行仓库代码：当场消费并校验 GPT 的结论，按结论提交、打包上传。
+      # 仓库代码（npm ci 的安装脚本、测试）只在另一个 job（gate）里运行：它改不了本 job 已上传的结论与提交，
+      # 也拿不到 key（GPT 审核 #76：同一 job 里安装脚本可改写 $RUNNER_TEMP 中尚未消费的结论，把 needs-user 改成 pr）
+      - name: 采纳结果并提交
+        id: take
         if: always() && steps.ctx.outcome == 'success'
         env:
           OUT: ${{ runner.temp }}/devloop
           START: ${{ steps.start.outputs.start }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CODEX_OUTCOME: ${{ steps.codex.outcome }}
-          INSTALL_OUTCOME: ${{ steps.install.outcome }}
           RESULT: ${{ runner.temp }}/codex-result.json
           N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
         run: |
           set -uo pipefail
           WHO='执行者：GPT（devloop 主设，codex.yml）'
-          stop() { printf '%s\n\n%s\n\n运行记录：%s\n' "$WHO" "$1" "$RUN_URL" > "$OUT/body.md"; echo needs-user > "$OUT/outcome"; exit 0; }
+          stop() { printf '%s\n\n%s\n\n运行记录：%s\n' "$WHO" "$1" "$RUN_URL" > "$OUT/body.md"; echo needs-user > "$OUT/outcome"; echo outcome=needs-user >> "$GITHUB_OUTPUT"; exit 0; }
           [ "$CODEX_OUTCOME" = "success" ] || stop "GPT 这一步没有正常完成（结果：${CODEX_OUTCOME:-未运行}），自动循环在此停下。"
-          [ "$INSTALL_OUTCOME" = "success" ] || stop "安装依赖（npm ci）失败（结果：${INSTALL_OUTCOME:-未运行}），未发布；日志见运行记录。"
           jq -e '.outcome and .body' "$RESULT" >/dev/null 2>&1 || stop "GPT 没有给出合法的结果。"
           printf '%s\n\n%s\n' "$WHO" "$(jq -r .body "$RESULT")" > "$OUT/body.md"
           jq -r '.title // ""' "$RESULT" | head -c 120 > "$OUT/title.txt"
-          if [ "$(jq -r .outcome "$RESULT")" != "pr" ]; then echo needs-user > "$OUT/outcome"; exit 0; fi
+          if [ "$(jq -r .outcome "$RESULT")" != "pr" ]; then echo needs-user > "$OUT/outcome"; echo outcome=needs-user >> "$GITHUB_OUTPUT"; exit 0; fi
           git add -A
           git diff --cached --quiet && stop "GPT 说已完成，但工作区没有任何改动。"
           git diff --cached --name-only | grep -q '^\.github/workflows/' && stop "改动包含 .github/workflows/（发布令牌推不上去），请用户处理。"
           git commit -q -m "$(jq -r '.title // "GPT 实现"' "$RESULT" | head -c 120)" -m "devloop：GPT（codex.yml）#$N"
-          if [ -f package.json ]; then
-            if ! (npm test && npm run build) > "$RUNNER_TEMP/gate.log" 2>&1; then
-              stop "$(printf 'GPT 的改动没有通过 npm test / npm run build，未发布。日志末尾：\n\n```\n%s\n```' "$(tail -n 40 "$RUNNER_TEMP/gate.log")")"
-            fi
-          fi
           git bundle create "$OUT/work.bundle" "$START..HEAD" HEAD
           echo pr > "$OUT/outcome"
+          echo outcome=pr >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -193,8 +186,44 @@ jobs:
           path: ${{ runner.temp }}/devloop
           retention-days: 7
 
-  publish:
+  # 把关：不持有任何 key、只读令牌；取出 work 上传的提交，在干净的 runner 上安装依赖、跑测试与构建。
+  # 这里运行的仓库代码影响不了 work 已定的结论与提交；不通过时由 publish 转 needs-user 并附日志。
+  gate:
     needs: work
+    if: always() && needs.work.outputs.outcome == 'pr'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.work.outputs.start }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: devloop-${{ github.run_id }}
+          path: ${{ runner.temp }}/devloop
+      - name: 取出 GPT 的提交
+        run: git fetch -q "$RUNNER_TEMP/devloop/work.bundle" HEAD && git checkout -q --detach FETCH_HEAD
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: 安装依赖、跑测试与构建
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/gate"
+          if [ -f package.json ]; then (npm ci --no-audit --no-fund && npm test && npm run build) 2>&1 | tee "$RUNNER_TEMP/gate/gate.log"; fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: gate-${{ github.run_id }}
+          path: ${{ runner.temp }}/gate
+          retention-days: 7
+
+  publish:
+    needs: [work, gate]
     if: always() && needs.work.result != 'skipped' && needs.work.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -208,6 +237,25 @@ jobs:
         with:
           name: devloop-${{ github.run_id }}
           path: out
+      - uses: actions/download-artifact@v4
+        if: needs.gate.result == 'failure'
+        continue-on-error: true
+        with:
+          name: gate-${{ github.run_id }}
+          path: gate
+      # GPT 结论是 pr 但把关没通过（或没跑完）→ 不发布，转 needs-user 并附日志末尾
+      - name: 合并把关结果
+        env:
+          GATE: ${{ needs.gate.result }}
+          WORK_OUTCOME: ${{ needs.work.outputs.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$WORK_OUTCOME" = pr ] && [ "$GATE" != success ]; then
+            TAIL="$(tail -n 40 gate/gate.log 2>/dev/null || echo '（没有日志）')"
+            printf '执行者：GPT（devloop 主设，codex.yml）\n\nGPT 的改动没有通过安装依赖 / 测试 / 构建（把关结果：%s），未发布。日志末尾：\n\n```\n%s\n```\n\n运行记录：%s\n' "$GATE" "$TAIL" "$RUN_URL" > out/body.md
+            echo needs-user > out/outcome
+            rm -f out/work.bundle
+          fi
       - uses: actions/checkout@v4
         with:
           ref: main

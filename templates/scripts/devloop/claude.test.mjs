@@ -369,7 +369,8 @@ test('codex.yml / claude.yml：读 issue 与 PR 只用 gh … --json（不带 --
 
 test('codex.yml：执行代码的任务只读、GPT 经 main 上的 gpt-agent 只改工作区、跑测试的步骤不持有 key、固定 runner 镜像；发布任务不运行模型', () => {
   const yml = readFileSync(join(HERE, '../../.github/workflows/codex.yml'), 'utf8');
-  const work = yml.slice(yml.indexOf('\n  work:'), yml.indexOf('\n  publish:'));
+  const work = yml.slice(yml.indexOf('\n  work:'), yml.indexOf('\n  gate:'));
+  const gate = yml.slice(yml.indexOf('\n  gate:'), yml.indexOf('\n  publish:'));
   const pub = yml.slice(yml.indexOf('\n  publish:'));
   assert.match(work, /permissions:\n {6}contents: read\n {6}issues: read\n {6}pull-requests: read\n {6}actions: read\n/);
   assert.doesNotMatch(work, /: write/);
@@ -378,21 +379,55 @@ test('codex.yml：执行代码的任务只读、GPT 经 main 上的 gpt-agent �
   // 运行的是 main 上的 gpt-agent.mjs（先从 _devloop 复制出来），不是待修分支上的
   assert.match(work, /cp _devloop\/scripts\/devloop\/gpt-agent\.mjs "\$RUNNER_TEMP\/gpt-agent\.mjs"/);
   assert.match(work, /node "\$RUNNER_TEMP\/gpt-agent\.mjs" --mode write /);
-  // 仓库代码（npm ci、测试）只能在唯一一个持有 key 的模型步骤之后运行（Codex 审核 #76 P1）
   const steps = work.split('\n      - ');
   const keyed = steps.map((x, i) => (/OPENAI_API_KEY/.test(x) ? i : -1)).filter((i) => i >= 0);
   assert.equal(keyed.length, 1, '只有一个步骤持有 key');
-  const firstRepoCode = steps.findIndex((x) => /npm ci --no-audit|\(npm test && npm run build\)/.test(x));
-  assert.ok(firstRepoCode > keyed[0] && keyed[0] >= 0, '仓库代码在模型之后才运行');
   assert.match(steps[keyed[0]], /gpt-agent\.mjs" --mode write/);
-  // 安装依赖失败也不能发布（GPT 审核 #76）：把关步骤检查 install 的 outcome，且在提交之前
-  assert.match(work, /name: 安装依赖\n {8}id: install\n/);
-  const gate = steps.find((x) => x.startsWith('name: 提交并把关'));
-  assert.match(gate, /INSTALL_OUTCOME: \$\{\{ steps\.install\.outcome \}\}/);
-  assert.ok(gate.indexOf('"$INSTALL_OUTCOME" = "success" ] || stop') >= 0 && gate.indexOf('"$INSTALL_OUTCOME"') < gate.indexOf('git commit'));
+  // work 不运行任何仓库代码（Codex 审核 #76 P1；GPT 审核 #76：安装脚本不能改写尚未消费的结论）
+  assert.doesNotMatch(work, /npm ci --no-audit|npm test &&|npm run build\)/);
+  // 结论在 work 里当场消费，经 job 输出交给 gate / publish
+  assert.match(work, /outcome: \$\{\{ steps\.take\.outputs\.outcome \}\}/);
+  assert.match(work, /echo outcome=pr >> "\$GITHUB_OUTPUT"/);
+  // gate：没有 key、只读令牌，只在结论是 pr 时运行，取 work 的 bundle 再安装与测试
+  assert.doesNotMatch(gate, /secrets\.|OPENAI|: write/);
+  assert.match(gate, /permissions:\n {6}contents: read\n {4}steps:/);
+  assert.match(gate, /if: always\(\) && needs\.work\.outputs\.outcome == 'pr'/);
+  assert.match(gate, /work\.bundle" HEAD && git checkout -q --detach FETCH_HEAD/);
+  assert.match(gate, /npm ci --no-audit --no-fund && npm test && npm run build/);
+  // publish：把关没通过就转 needs-user，丢掉 bundle
+  assert.match(pub, /needs: \[work, gate\]/);
+  assert.match(pub, /if \[ "\$WORK_OUTCOME" = pr \] && \[ "\$GATE" != success \]; then[\s\S]*echo needs-user > out\/outcome\n {12}rm -f out\/work\.bundle/);
+  assert.ok(pub.indexOf('合并把关结果') < pub.indexOf('publish.sh'));
   assert.match(work, /\^\\\.github\/workflows\//, '改了工作流的结果不发布');
   assert.match(work, /PREFIX: codex\n {10}LABEL: gpt-design/);
   assert.doesNotMatch(pub, /codex-action|claude-code-action|npm /);
   assert.match(pub, /PREFIX: codex/);
   assert.match(yml, /github\.event\.label\.name == 'gpt-design'/);
+});
+
+test('codex.yml publish「合并把关结果」：结论 pr 但把关失败 / 没跑完 → needs-user、附日志、丢 bundle；把关通过或结论本就 needs-user 则不动', () => {
+  const yml = readFileSync(join(HERE, '../../.github/workflows/codex.yml'), 'utf8');
+  const step = yml.slice(yml.indexOf('- name: 合并把关结果'));
+  const script = step.slice(step.indexOf('run: |\n') + 7).split('\n').filter((l, i, a) => a.slice(0, i + 1).every((x) => x.startsWith('          ') || x === '')).map((l) => l.slice(10)).join('\n');
+  const runIt = (env, log) => {
+    const d = mkdtempSync(join(tmpdir(), 'gate-'));
+    mkdirSync(join(d, 'out'));
+    writeFileSync(join(d, 'out/outcome'), `${env.WORK_OUTCOME}\n`);
+    writeFileSync(join(d, 'out/body.md'), 'GPT 的说明');
+    writeFileSync(join(d, 'out/work.bundle'), 'B');
+    if (log) {
+      mkdirSync(join(d, 'gate'));
+      writeFileSync(join(d, 'gate/gate.log'), log);
+    }
+    const r = spawnSync('bash', ['-c', script], { cwd: d, env: { ...process.env, RUN_URL: 'U', ...env }, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return { outcome: readFileSync(join(d, 'out/outcome'), 'utf8').trim(), body: readFileSync(join(d, 'out/body.md'), 'utf8'), bundle: existsSync(join(d, 'out/work.bundle')) };
+  };
+  const failed = runIt({ WORK_OUTCOME: 'pr', GATE: 'failure' }, 'npm ERR! 测试失败');
+  assert.equal(failed.outcome, 'needs-user');
+  assert.match(failed.body, /把关结果：failure[\s\S]*npm ERR! 测试失败/);
+  assert.equal(failed.bundle, false);
+  assert.equal(runIt({ WORK_OUTCOME: 'pr', GATE: 'cancelled' }).outcome, 'needs-user');
+  assert.deepEqual(runIt({ WORK_OUTCOME: 'pr', GATE: 'success' }), { outcome: 'pr', body: 'GPT 的说明', bundle: true });
+  assert.equal(runIt({ WORK_OUTCOME: 'needs-user', GATE: 'skipped' }).outcome, 'needs-user');
 });
