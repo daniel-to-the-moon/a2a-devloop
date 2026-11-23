@@ -383,6 +383,10 @@ test('codex.yml：执行代码的任务只读、GPT 经 main 上的 gpt-agent �
   const keyed = steps.map((x, i) => (/OPENAI_API_KEY/.test(x) ? i : -1)).filter((i) => i >= 0);
   assert.equal(keyed.length, 1, '只有一个步骤持有 key');
   assert.match(steps[keyed[0]], /gpt-agent\.mjs" --mode write/);
+  // 修复模式给模型本 PR 相对 main 的 diff（只读，经 --diff-dir）；提示词里留有被 withDiff 替换的那一行
+  assert.match(work, /git diff origin\/main\.\.\.HEAD > "\$C\/diff\/diff\.patch"/);
+  assert.match(steps[keyed[0]], /if \[ "\$MODE" = fix \]; then DD=\(--diff-dir "\$RUNNER_TEMP\/codex-ctx\/diff"\); fi/);
+  assert.match(work, /echo '用 `git diff origin\/main\.\.\.HEAD` 查看本 PR 相对 main 的已有改动。'/);
   // work 不运行任何仓库代码（Codex 审核 #76 P1；GPT 审核 #76：安装脚本不能改写尚未消费的结论）
   assert.doesNotMatch(work, /npm ci --no-audit|npm test &&|npm run build\)/);
   // 结论在 work 里当场消费，经 job 输出交给 gate / publish

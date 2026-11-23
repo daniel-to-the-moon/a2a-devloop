@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, existsSync, symlinkSync, writeFil
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { endpoint, makeTools, runAgent, safePath, withDiff } from './gpt-agent.mjs';
+import { FIX_NOTE, endpoint, makeTools, runAgent, safePath, withDiff } from './gpt-agent.mjs';
 
 function repo() {
   const root = mkdtempSync(join(tmpdir(), 'agent-'));
@@ -118,6 +118,10 @@ test('withDiff：把 git diff 那行换成预生成的改动附在末尾，过�
   assert.match(out, /附在本提示词末尾[\s\S]*## 完整 diff\n\n```diff\nD\n```$/);
   assert.match(withDiff(p, { diff: 'x'.repeat(200_001) }), /过长[\s\S]*read_diff 从 offset=200000/);
   assert.throws(() => withDiff('没有那一行', {}), /找不到/);
+  // 修复模式换成修复用的说明（告诉模型怎样按 diff 撤回改动）
+  const fix = withDiff('你是主设 GPT\n用 `git diff origin/main...HEAD` 查看本 PR 相对 main 的已有改动。\n结尾', { diff: 'D' }, FIX_NOTE);
+  assert.match(fix, /相对 main 的已有改动[\s\S]*delete_file 删除[\s\S]*```diff\nD\n```$/);
+  assert.doesNotMatch(fix, /你只需审代码/);
 });
 
 test('runAgent：给了 diffText 就多一个只读、可分页的 read_diff 工具，能读到截断之后的部分', async () => {

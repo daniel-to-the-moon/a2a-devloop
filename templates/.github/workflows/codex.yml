@@ -112,6 +112,12 @@ jobs:
           if [ "$MODE" = "fix" ]; then
             gh pr view "$N" -R "$REPO" --json title,body,headRefName -q "$md" > "$C/task.md"
             gh pr view "$N" -R "$REPO" --json comments -q "$cm" > "$C/comments.md"
+            # 模型看不到 git：把本 PR 相对 main 的改动预先生成给它（只读，经 --diff-dir 进提示词并可用 read_diff 分页读）。
+            # 审核要求撤回超范围改动时，靠这份 diff 才知道 main 上原来是什么
+            mkdir -p "$C/diff"
+            git diff --stat origin/main...HEAD > "$C/diff/stat.txt"
+            git diff origin/main...HEAD > "$C/diff/diff.patch"
+            git log --no-color origin/main..HEAD > "$C/diff/log.txt"
           else
             { gh issue view "$N" -R "$REPO" --json title,body -q "$md"; echo; echo '# 评论'; echo
               gh issue view "$N" -R "$REPO" --json comments -q "$cm"; } > "$C/task.md"
@@ -142,7 +148,7 @@ jobs:
             echo "## 任务全文"
             echo ""
             cat "$C/task.md"
-            if [ "$MODE" = fix ]; then echo; echo "## PR 评论（按时间顺序）"; echo; cat "$C/comments.md"; fi
+            if [ "$MODE" = fix ]; then echo; echo "## PR 评论（按时间顺序）"; echo; cat "$C/comments.md"; echo; echo '用 `git diff origin/main...HEAD` 查看本 PR 相对 main 的已有改动。'; fi
           } > "$RUNNER_TEMP/prompt.md"
       - name: GPT 实现
         id: codex
@@ -152,7 +158,11 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GPT_RESPONSES_ENDPOINT: ${{ vars.GPT_RESPONSES_ENDPOINT }}
           MODEL: ${{ vars.GPT_DESIGN_MODEL || vars.GPT_MODEL }}
-        run: node "$RUNNER_TEMP/gpt-agent.mjs" --mode write --root . --prompt "$RUNNER_TEMP/prompt.md" --schema "$RUNNER_TEMP/codex-result.schema.json" --out "$RUNNER_TEMP/codex-result.json"
+          MODE: ${{ steps.ctx.outputs.mode }}
+        run: |
+          DD=()
+          if [ "$MODE" = fix ]; then DD=(--diff-dir "$RUNNER_TEMP/codex-ctx/diff"); fi
+          node "$RUNNER_TEMP/gpt-agent.mjs" --mode write --root . --prompt "$RUNNER_TEMP/prompt.md" --schema "$RUNNER_TEMP/codex-result.schema.json" --out "$RUNNER_TEMP/codex-result.json" "${DD[@]}"
       # 以下不经模型、也不运行仓库代码：当场消费并校验 GPT 的结论，按结论提交、打包上传。
       # 仓库代码（npm ci 的安装脚本、测试）只在另一个 job（gate）里运行：它改不了本 job 已上传的结论与提交，
       # 也拿不到 key（GPT 审核 #76：同一 job 里安装脚本可改写 $RUNNER_TEMP 中尚未消费的结论，把 needs-user 改成 pr）

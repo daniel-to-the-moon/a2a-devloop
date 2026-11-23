@@ -13,7 +13,8 @@
  * finish 的参数就是结果（schema 由 --schema 给出），写到 --out。
  *
  * 用法：node gpt-agent.mjs --mode write|read --root DIR --prompt FILE --schema FILE --out FILE [--feedback FILE] [--diff-dir DIR]
- *   --diff-dir：审核用，目录里有工作流预先生成的 stat.txt / diff.patch / log.txt（模型不能跑 git），并进提示词
+ *   --diff-dir：目录里有工作流预先生成的 stat.txt / diff.patch / log.txt（模型不能跑 git），并进提示词，另给只读的 read_diff 工具；
+ *              审核（read）用来看完整改动，修复（write）用来知道本 PR 相对 main 改了什么（撤回超范围改动时要用）
  * 环境：OPENAI_API_KEY；GPT_RESPONSES_ENDPOINT（完整地址，可空 = 官方）；MODEL；EFFORT（默认 high）
  */
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -269,12 +270,16 @@ async function call(fetchImpl, url, env, body, { deadline, now, sleep }) {
 
 const MAX_DIFF = 200_000;
 
-/** 审核提示词里“用 `git diff …` 查看完整改动”换成预生成的改动（模型不能跑命令）；过长则截断并提示用 read_file 读文件 */
-export function withDiff(prompt, { stat = '', diff = '', log = '' }) {
+const REVIEW_NOTE = '完整改动已由工作流预先生成，附在本提示词末尾（你不能运行命令）；需要上下文时用 read_file / search 阅读 PR 头部提交的检出。测试与构建由 CI 在合并后的代码上另行执行，你只需审代码。审完调用 finish 给出结论。';
+/** 修复模式（write）：模型看不到 git 历史，审核要求撤回超范围改动时靠这份 diff 知道 main 上原来是什么 */
+export const FIX_NOTE = '本 PR 相对 main 的已有改动（git diff 与提交记录）已由工作流预先生成，附在本提示词末尾（只读；你不能运行 git）。要撤回某处改动：按 diff 里的 - 行恢复原内容，用 write_file 写回整个文件；本 PR 新增的文件用 delete_file 删除。';
+
+/** 提示词里“用 `git diff …` 查看…”这一行换成预生成的改动（模型不能跑命令）；过长则截断并提示用 read_diff 分页读。note：替换那一行的说明（默认是审核用的） */
+export function withDiff(prompt, { stat = '', diff = '', log = '' }, note = REVIEW_NOTE) {
   const lines = prompt.split('\n');
   const i = lines.findIndex((l) => l.startsWith('用 `git diff '));
-  if (i < 0) throw new Error('审核提示词里找不到“用 `git diff …` 查看完整改动”这一行');
-  lines[i] = '完整改动已由工作流预先生成，附在本提示词末尾（你不能运行命令）；需要上下文时用 read_file / search 阅读 PR 头部提交的检出。测试与构建由 CI 在合并后的代码上另行执行，你只需审代码。审完调用 finish 给出结论。';
+  if (i < 0) throw new Error('提示词里找不到“用 `git diff …` 查看改动”这一行');
+  lines[i] = note;
   const cut = diff.length > MAX_DIFF;
   return [lines.join('\n'), '', '## 提交记录', '', '```', log.trim(), '```', '', '## 改动统计', '', '```', stat.trim(), '```', '', `## 完整 diff${cut ? `（过长，这里只附前 ${MAX_DIFF} 字符；必须用 read_diff 从 offset=${MAX_DIFF} 读完剩下的部分再下结论）` : ''}`, '', '```diff', cut ? diff.slice(0, MAX_DIFF) : diff, '```'].join('\n');
 }
@@ -292,7 +297,7 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   if (fb && existsSync(fb)) prompt += `\n\n## 上一轮改动没有通过把关（npm test / npm run build），日志末尾如下。请在现有改动基础上修好，再调用 finish：\n\n\`\`\`\n${readFileSync(fb, 'utf8').slice(-12000)}\n\`\`\`\n`;
   const dd = arg('diff-dir');
   const ctx = dd ? Object.fromEntries(['stat', 'diff', 'log'].map((k) => [k, readFileSync(join(dd, k === 'diff' ? 'diff.patch' : `${k}.txt`), 'utf8')])) : null;
-  if (ctx) prompt = withDiff(prompt, ctx);
+  if (ctx) prompt = withDiff(prompt, ctx, mode === 'write' ? FIX_NOTE : undefined);
   const schema = JSON.parse(readFileSync(arg('schema'), 'utf8'));
   const r = await runAgent({ mode, root: arg('root'), prompt, schema, env: process.env, diffText: ctx?.diff ?? null, log: (m) => console.log(m) });
   writeFileSync(arg('out'), JSON.stringify(r.result, null, 2));
