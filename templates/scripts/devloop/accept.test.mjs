@@ -127,21 +127,42 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   const rc = await run({ provider: 'anthropic', model: 'claude-opus-5-5', shotsDir: '/d', stylePath: '/style', env, cfg, fetchImpl: c.fetchImpl, fs });
   assert.equal(rc.verdict, 'pass', JSON.stringify(rc));
   assert.ok(c.calls.every((x) => x.url === 'https://gw2/v1/messages' && x.headers['x-api-key'] === 'ak' && x.body.model === 'claude-opus-5-5'));
-  const WRONG = '{"tl":"red","tr":"red","bl":"red","br":"red"}';
+  // 答错两次：error，原因是程序生成的固定文字（不含模型原话），原话只在 canary 字段
+  const WRONG = '{"tl":"red","tr":"red","bl":"red","br":"red"} 结论：未达标';
   const blind = rig('openai', [WRONG, WRONG, SCORE]);
   const rb = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: blind.fetchImpl });
   assert.equal(rb.verdict, 'error');
-  assert.match(rb.reason, /多模态自检失败.*两次.*回答：\{"tl":"red"/);
-  assert.equal(blind.calls.length, 2, '自检问两次都答错就不再评分');
+  assert.match(rb.reason, /多模态自检失败.*两次都没有通过（答错、答错；/);
+  assert.doesNotMatch(rb.reason, /结论：未达标|"tl"/, '模型原话不进 reason（会写进评论、影响轮次统计）');
+  assert.deepEqual(rb.canary.map((x) => x.kind), ['wrong', 'wrong']);
+  assert.match(rb.canary[0].answer, /"tl":"red"/);
+  assert.equal(blind.calls.length, 2, '自检两次都没通过就不再评分');
+  // 回答里带“结论：未达标”的 error 报告不计入视觉轮次
+  const report = reportPlan({ pr: 1, head: 'a'.repeat(40), judge: rb, preview: '', runUrl: 'u', rounds: 0, maxRounds: 3, visual: { waitLabel: 'w', acceptLabel: 'a' } });
+  assert.equal(visualRounds([{ author: 'github-actions', body: report.body }]), 0);
   // 第一次答偏、第二次答对 → 继续评分
   const unsure = rig('openai', [WRONG, CANARY, SCORE]);
   const rf = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: unsure.fetchImpl });
   assert.equal(rf.verdict, 'pass', JSON.stringify(rf));
   assert.equal(unsure.calls.length, 3);
-  // 没有文字输出：原因里写出 status
-  const empty = rig('openai', ['', '', SCORE]);
-  const re = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: empty.fetchImpl });
-  assert.match(re.reason, /没有文字输出/);
+  // 第一次答错、第二次没有文字输出（真实的 incomplete 响应）：两次的诊断都保留，不再评分
+  const calls2 = [];
+  const bodies = [
+    { output: [{ content: [{ type: 'output_text', text: WRONG }] }] },
+    { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output: [] },
+  ];
+  const mixed = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: async (u, init) => { calls2.push(init); return { ok: true, status: 200, text: async () => JSON.stringify(bodies[calls2.length - 1]) }; } });
+  assert.equal(mixed.verdict, 'error');
+  assert.equal(calls2.length, 2);
+  assert.match(mixed.reason, /答错、没有文字输出/);
+  assert.deepEqual(mixed.canary[1], { kind: 'no-text', status: 'incomplete', incomplete: { reason: 'max_output_tokens' } });
+  assert.match(mixed.canary[0].answer, /"tl":"red"/);
+  // 第一次答错、第二次调用失败（4xx 不重试）：第一次的回答仍保留
+  let n3 = 0;
+  const failed2 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: async () => (++n3 === 1 ? { ok: true, status: 200, text: async () => JSON.stringify(bodies[0]) } : { ok: false, status: 400, text: async () => '{"error":"bad"}' }) });
+  assert.equal(failed2.verdict, 'error');
+  assert.match(failed2.reason, /答错、调用失败/);
+  assert.deepEqual(failed2.canary.map((x) => x.kind), ['wrong', 'call-failed']);
   const waits = [];
   const sleep = async (ms) => { waits.push(ms); };
   let n502 = 0;

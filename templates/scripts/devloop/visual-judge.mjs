@@ -231,14 +231,27 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
     }
   };
   try {
-    // 自检最多问 2 次（同一模型偶尔答偏）；仍须答对才继续，失败时把模型的原话写进原因，便于判断是不支持图片还是答偏
-    let said = '';
-    for (let k = 0; k < 2; k++) {
-      const c = await call(toRequest(provider, { model, parts: canaryParts(), system: '' }));
-      said = outputText(provider, c);
-      if (canaryOk(said)) break;
-      said = said.trim() ? said : `（没有文字输出；status=${c?.status ?? c?.stop_reason ?? '?'}${c?.incomplete_details ? `，${JSON.stringify(c.incomplete_details)}` : ''}）`;
-      if (k === 1) return { verdict: 'error', reason: `多模态自检失败：${model} 两次都没有正确识别测试图（回答：${said.replace(/\s+/g, ' ').slice(0, 200)}）`, ...names };
+    // 自检对未通过的情况再问一次；仍须答对才继续。每次的诊断（答错的原话 / 没有文字输出时的 status / 调用失败）
+    // 只放进结果的 canary 字段（进运行摘要与产物），不进 reason：reason 会写进机器人评论，而轮次统计按评论文字匹配，
+    // 模型原话不能影响流水线的判定
+    const canary = [];
+    let passed = false;
+    for (let k = 0; k < 2 && !passed; k++) {
+      try {
+        const c = await call(toRequest(provider, { model, parts: canaryParts(), system: '' }));
+        const said = outputText(provider, c);
+        if (canaryOk(said)) passed = true;
+        else if (said.trim()) canary.push({ kind: 'wrong', answer: said.slice(0, 500) });
+        else canary.push({ kind: 'no-text', status: c?.status ?? c?.stop_reason ?? null, incomplete: c?.incomplete_details ?? null });
+      } catch (e) {
+        // 第一次就调用失败（已按退避重试过）是基础设施问题，照常报“评分失败”；第二次失败时保留第一次的回答
+        if (k === 0) throw e;
+        canary.push({ kind: 'call-failed', error: String(e.message).split('\n')[0].slice(0, 300) });
+      }
+    }
+    if (!passed) {
+      const kinds = { wrong: '答错', 'no-text': '没有文字输出', 'call-failed': '调用失败' };
+      return { verdict: 'error', reason: `多模态自检失败：${model} 两次都没有通过（${canary.map((x) => kinds[x.kind]).join('、')}；模型原话见运行摘要）`, canary, ...names };
     }
     const body = await call(toRequest(provider, { model, effort: cfg.effort, parts: buildParts({ style: fs.readFileSync(stylePath, 'utf8'), title, shots, baseline, reference }) }));
     return { ...judge(parseVerdict(outputText(provider, body)), cfg), ...names, usage: body.usage ?? null };

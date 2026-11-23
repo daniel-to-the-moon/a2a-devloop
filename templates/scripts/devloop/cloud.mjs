@@ -214,7 +214,7 @@ export async function runDecide({ pr, head, base, reviewResult, reviewPath, meta
     author,
     key: io.key,
     model: author === 'gpt' ? (io.claudeModel ?? 'Claude') : io.model,
-    where: author === 'gpt' ? '云端审核，Claude Code 只读' : '云端审核，openai/codex-action',
+    where: author === 'gpt' ? '云端审核，Claude Code 只读' : '云端审核，gpt-agent 直接调 Responses API',
     pr,
     head,
     review: review ?? { verdict: 'error', summary: `GPT 审核未能完成：${reviewError}`, findings: [] },
