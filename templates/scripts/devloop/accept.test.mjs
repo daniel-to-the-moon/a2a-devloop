@@ -127,11 +127,21 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   const rc = await run({ provider: 'anthropic', model: 'claude-opus-5-5', shotsDir: '/d', stylePath: '/style', env, cfg, fetchImpl: c.fetchImpl, fs });
   assert.equal(rc.verdict, 'pass', JSON.stringify(rc));
   assert.ok(c.calls.every((x) => x.url === 'https://gw2/v1/messages' && x.headers['x-api-key'] === 'ak' && x.body.model === 'claude-opus-5-5'));
-  const blind = rig('openai', ['{"tl":"red","tr":"red","bl":"red","br":"red"}', SCORE]);
+  const WRONG = '{"tl":"red","tr":"red","bl":"red","br":"red"}';
+  const blind = rig('openai', [WRONG, WRONG, SCORE]);
   const rb = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: blind.fetchImpl });
   assert.equal(rb.verdict, 'error');
-  assert.match(rb.reason, /多模态自检失败/);
-  assert.equal(blind.calls.length, 1, '自检失败就不再评分');
+  assert.match(rb.reason, /多模态自检失败.*两次.*回答：\{"tl":"red"/);
+  assert.equal(blind.calls.length, 2, '自检问两次都答错就不再评分');
+  // 第一次答偏、第二次答对 → 继续评分
+  const unsure = rig('openai', [WRONG, CANARY, SCORE]);
+  const rf = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: unsure.fetchImpl });
+  assert.equal(rf.verdict, 'pass', JSON.stringify(rf));
+  assert.equal(unsure.calls.length, 3);
+  // 没有文字输出：原因里写出 status
+  const empty = rig('openai', ['', '', SCORE]);
+  const re = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: empty.fetchImpl });
+  assert.match(re.reason, /没有文字输出/);
   const waits = [];
   const sleep = async (ms) => { waits.push(ms); };
   let n502 = 0;

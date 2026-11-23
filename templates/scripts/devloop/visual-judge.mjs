@@ -231,8 +231,15 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
     }
   };
   try {
-    const c = await call(toRequest(provider, { model, parts: canaryParts(), system: '' }));
-    if (!canaryOk(outputText(provider, c))) return { verdict: 'error', reason: `多模态自检失败：${model} 没有正确识别测试图，可能不支持图片输入`, ...names };
+    // 自检最多问 2 次（同一模型偶尔答偏）；仍须答对才继续，失败时把模型的原话写进原因，便于判断是不支持图片还是答偏
+    let said = '';
+    for (let k = 0; k < 2; k++) {
+      const c = await call(toRequest(provider, { model, parts: canaryParts(), system: '' }));
+      said = outputText(provider, c);
+      if (canaryOk(said)) break;
+      said = said.trim() ? said : `（没有文字输出；status=${c?.status ?? c?.stop_reason ?? '?'}${c?.incomplete_details ? `，${JSON.stringify(c.incomplete_details)}` : ''}）`;
+      if (k === 1) return { verdict: 'error', reason: `多模态自检失败：${model} 两次都没有正确识别测试图（回答：${said.replace(/\s+/g, ' ').slice(0, 200)}）`, ...names };
+    }
     const body = await call(toRequest(provider, { model, effort: cfg.effort, parts: buildParts({ style: fs.readFileSync(stylePath, 'utf8'), title, shots, baseline, reference }) }));
     return { ...judge(parseVerdict(outputText(provider, body)), cfg), ...names, usage: body.usage ?? null };
   } catch (e) {
