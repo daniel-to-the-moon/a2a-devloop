@@ -116,6 +116,8 @@ export function canaryPng() {
   ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(W, 4); ihdr[8] = 8; ihdr[9] = 2;
   return Buffer.concat([PNG, chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
+/** 自检答错时 canary 字段里保留的原话长度（按字符计，超出截断）；原话只进运行摘要与产物，不进评论 */
+export const CANARY_ANSWER_MAX = 500;
 export const CANARY_ANSWER = { tl: 'red', tr: 'green', bl: 'blue', br: 'yellow' };
 export const canaryParts = () => [
   { image: canaryPng().toString('base64') },
@@ -214,7 +216,7 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
       if (r.ok) throw new Error(`评分服务返回的不是 JSON（HTTP ${r.status}）：${text.slice(0, 200)}`);
     }
     if (!r.ok) throw Object.assign(new Error(`模型调用失败 HTTP ${r.status}：${JSON.stringify(body?.error ?? body).slice(0, 300)}`), { transient: r.status === 429 || r.status >= 500 });
-    if (body.stop_reason === 'refusal') throw new Error('模型拒绝回答');
+    if (body.stop_reason === 'refusal') throw Object.assign(new Error('模型拒绝回答'), { refusal: true });
     return body;
   };
   const call = async (payload) => {
@@ -241,16 +243,21 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
         const c = await call(toRequest(provider, { model, parts: canaryParts(), system: '' }));
         const said = outputText(provider, c);
         if (canaryOk(said)) passed = true;
-        else if (said.trim()) canary.push({ kind: 'wrong', answer: said.slice(0, 500) });
+        else if (said.trim()) canary.push({ kind: 'wrong', answer: [...said].slice(0, CANARY_ANSWER_MAX).join('') });
         else canary.push({ kind: 'no-text', status: c?.status ?? c?.stop_reason ?? null, incomplete: c?.incomplete_details ?? null });
       } catch (e) {
+        // 拒答是模型给出的结果，不是调用失败：记一次未通过，再问一次（正式评分仍不接受拒答）
+        if (e.refusal) {
+          canary.push({ kind: 'refusal' });
+          continue;
+        }
         // 第一次就调用失败（已按退避重试过）是基础设施问题，照常报“评分失败”；第二次失败时保留第一次的回答
         if (k === 0) throw e;
         canary.push({ kind: 'call-failed', error: String(e.message).split('\n')[0].slice(0, 300) });
       }
     }
     if (!passed) {
-      const kinds = { wrong: '答错', 'no-text': '没有文字输出', 'call-failed': '调用失败' };
+      const kinds = { wrong: '答错', 'no-text': '没有文字输出', refusal: '拒答', 'call-failed': '调用失败' };
       return { verdict: 'error', reason: `多模态自检失败：${model} 两次都没有通过（${canary.map((x) => kinds[x.kind]).join('、')}；模型原话见运行摘要）`, canary, ...names };
     }
     const body = await call(toRequest(provider, { model, effort: cfg.effort, parts: buildParts({ style: fs.readFileSync(stylePath, 'utf8'), title, shots, baseline, reference }) }));

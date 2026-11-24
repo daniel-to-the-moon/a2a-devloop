@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { acceptanceGate, acceptanceState, followUpsAccept, isAwaiting, isInFlight, isVisual, loadGates, queueBlocker, reportPlan, visualRounds, VISUAL_PREFIX } from './accept.mjs';
-import { buildParts, canaryOk, canaryPng, judge, loadShots, outputText, parseVerdict, run, toRequest } from './visual-judge.mjs';
+import { CANARY_ANSWER_MAX, buildParts, canaryOk, canaryPng, judge, loadShots, outputText, parseVerdict, run, toRequest } from './visual-judge.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 // 只装了云端审核、没装验收模块（没有 gates.json）时整组跳过
@@ -163,6 +163,35 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   assert.equal(failed2.verdict, 'error');
   assert.match(failed2.reason, /答错、调用失败/);
   assert.deepEqual(failed2.canary.map((x) => x.kind), ['wrong', 'call-failed']);
+  // 两次不同的回答都保留，超长的按字符截断到 CANARY_ANSWER_MAX
+  const LONG = '{"tl":"blue"} ' + '错'.repeat(CANARY_ANSWER_MAX + 50);
+  const two = rig('openai', [WRONG, LONG, SCORE]);
+  const rt = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: two.fetchImpl });
+  assert.equal(rt.canary[0].answer, WRONG);
+  assert.equal([...rt.canary[1].answer].length, CANARY_ANSWER_MAX);
+  assert.ok(LONG.startsWith(rt.canary[1].answer));
+  assert.doesNotMatch(rt.reason, /错错|"tl"/);
+  // Anthropic 拒答（HTTP 200、stop_reason=refusal）算一次未通过：首次拒答、再问答对 → 继续评分
+  const refuse = { content: [], stop_reason: 'refusal' };
+  const okA = { content: [{ type: 'text', text: CANARY }] };
+  const scoreA = { content: [{ type: 'text', text: SCORE }] };
+  const seqA = (list) => { const calls = []; return { calls, fetchImpl: async (u, init) => { calls.push(init); return { ok: true, status: 200, text: async () => JSON.stringify(list[calls.length - 1]) }; } }; };
+  const ra1 = seqA([refuse, okA, scoreA]);
+  const rr1 = await run({ provider: 'anthropic', model: 'claude-opus-5-5', shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: ra1.fetchImpl });
+  assert.equal(rr1.verdict, 'pass', JSON.stringify(rr1));
+  assert.equal(ra1.calls.length, 3);
+  // 连续拒答：保留诊断、不发起正式评分
+  const ra2 = seqA([refuse, refuse, scoreA]);
+  const rr2 = await run({ provider: 'anthropic', model: 'claude-opus-5-5', shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: ra2.fetchImpl });
+  assert.equal(rr2.verdict, 'error');
+  assert.match(rr2.reason, /拒答、拒答/);
+  assert.deepEqual(rr2.canary, [{ kind: 'refusal' }, { kind: 'refusal' }]);
+  assert.equal(ra2.calls.length, 2);
+  // 正式评分仍不接受拒答
+  const ra3 = seqA([okA, refuse]);
+  const rr3 = await run({ provider: 'anthropic', model: 'claude-opus-5-5', shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: ra3.fetchImpl });
+  assert.equal(rr3.verdict, 'error');
+  assert.match(rr3.reason, /评分失败：模型拒绝回答/);
   const waits = [];
   const sleep = async (ms) => { waits.push(ms); };
   let n502 = 0;
