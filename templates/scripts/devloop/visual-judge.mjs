@@ -118,6 +118,11 @@ export function canaryPng() {
 }
 /** 自检答错时 canary 字段里保留的原话长度（按字符计，超出截断）；原话只进运行摘要与产物，不进评论 */
 export const CANARY_ANSWER_MAX = 500;
+/** 外部文字（模型原话、服务返回的正文）写进诊断字段前的处理：去掉三个及以上的反引号（运行摘要里用 ```json 围住），按字符截断 */
+export const scrub = (s, max) => [...String(s ?? '').replace(/`{3,}/g, (m) => 'ʼ'.repeat(m.length))].slice(0, max).join('');
+/** 调用失败：reason 是本地生成、只含错误类别与 HTTP 状态的短句（会进评论）；message 是带服务返回正文的详情（只进诊断字段） */
+const failure = (reason, detail = reason, extra = {}) => Object.assign(new Error(detail), { reason, ...extra });
+const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim();
 export const CANARY_ANSWER = { tl: 'red', tr: 'green', bl: 'blue', br: 'yellow' };
 export const canaryParts = () => [
   { image: canaryPng().toString('base64') },
@@ -146,7 +151,7 @@ export function parseVerdict(text) {
     if (!Number.isInteger(v) || v < 1 || v > 10) throw new Error(`分数 ${k} 不是 1–10 的整数：${JSON.stringify(v)}`);
     scores[k] = v;
   }
-  const notes = Array.isArray(j.notes) ? j.notes.filter((x) => typeof x === 'string').map((x) => x.slice(0, 400)).slice(0, 5) : [];
+  const notes = Array.isArray(j.notes) ? j.notes.filter((x) => typeof x === 'string').map((x) => oneLine(x).slice(0, 400)).slice(0, 5) : [];
   return { scores, notes };
 }
 
@@ -195,28 +200,28 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
   const deadline = now() + (cfg.deadlineMs ?? 15 * 60_000);
   const left = () => deadline - now();
   const once = async (payload) => {
-    if (left() <= 0) throw new Error('评分超出总时限');
+    if (left() <= 0) throw failure('评分超出总时限');
     let r;
     try {
       r = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(Math.min(cfg.timeoutMs ?? 300000, left())) });
     } catch (e) {
-      throw Object.assign(new Error(`连不上评分服务 ${new URL(url).host}：${netReason(e)}`), { transient: true });
+      throw failure(oneLine(`连不上评分服务 ${new URL(url).host}：${netReason(e)}`), undefined, { transient: true });
     }
     // 响应头到了不等于响应体也能读完：读响应体时的超时、连接中断同样算暂时故障；读完但不是 JSON 才是格式错误
     let text;
     try {
       text = await r.text();
     } catch (e) {
-      throw Object.assign(new Error(`读取评分服务响应失败 ${new URL(url).host}（HTTP ${r.status}）：${netReason(e)}`), { transient: true });
+      throw failure(oneLine(`读取评分服务响应失败 ${new URL(url).host}（HTTP ${r.status}）：${netReason(e)}`), undefined, { transient: true });
     }
     let body = {};
     try {
       body = text ? JSON.parse(text) : {};
     } catch {
-      if (r.ok) throw new Error(`评分服务返回的不是 JSON（HTTP ${r.status}）：${text.slice(0, 200)}`);
+      if (r.ok) throw failure(`评分服务返回的不是 JSON（HTTP ${r.status}）`, `评分服务返回的不是 JSON（HTTP ${r.status}）：${text.slice(0, 200)}`);
     }
-    if (!r.ok) throw Object.assign(new Error(`模型调用失败 HTTP ${r.status}：${JSON.stringify(body?.error ?? body).slice(0, 300)}`), { transient: r.status === 429 || r.status >= 500 });
-    if (body.stop_reason === 'refusal') throw Object.assign(new Error('模型拒绝回答'), { refusal: true });
+    if (!r.ok) throw failure(`模型调用失败 HTTP ${r.status}`, `模型调用失败 HTTP ${r.status}：${JSON.stringify(body?.error ?? body).slice(0, 300)}`, { transient: r.status === 429 || r.status >= 500 });
+    // 拒答（Anthropic HTTP 200、stop_reason=refusal）是模型给出的结果，不在传输层当错误处理，由调用方按场景判定
     return body;
   };
   const call = async (payload) => {
@@ -226,44 +231,58 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
       } catch (e) {
         const wait = (cfg.retryDelayMs ?? 15000) * i;
         const outOfTime = left() - wait <= 0;
-        if (!e.transient || i >= attempts || outOfTime) throw i > 1 || outOfTime ? new Error(`${e.message}（已重试 ${i} 次${outOfTime ? '，已到总时限' : ''}）`) : e;
+        if (!e.transient || i >= attempts || outOfTime) {
+          if (i === 1 && !outOfTime) throw e;
+          const tail = `（已重试 ${i} 次${outOfTime ? '，已到总时限' : ''}）`;
+          throw failure(`${e.reason ?? '调用失败'}${tail}`, `${e.message}${tail}`);
+        }
         console.error(`第 ${i} 次调用失败，稍后重试：${e.message}`);
         await sleep(wait);
       }
     }
   };
+  // 自检的诊断在所有结局（通过、未达标、调用失败）都随结果返回：第一次没通过、第二次答对时也保留
+  const canary = [];
+  const withCanary = (r) => (canary.length ? { ...r, canary } : r);
   try {
     // 自检对未通过的情况再问一次；仍须答对才继续。每次的诊断（答错的原话 / 没有文字输出时的 status / 调用失败）
     // 只放进结果的 canary 字段（进运行摘要与产物），不进 reason：reason 会写进机器人评论，而轮次统计按评论文字匹配，
     // 模型原话不能影响流水线的判定
-    const canary = [];
     let passed = false;
     for (let k = 0; k < 2 && !passed; k++) {
       try {
         const c = await call(toRequest(provider, { model, parts: canaryParts(), system: '' }));
-        const said = outputText(provider, c);
-        if (canaryOk(said)) passed = true;
-        else if (said.trim()) canary.push({ kind: 'wrong', answer: [...said].slice(0, CANARY_ANSWER_MAX).join('') });
-        else canary.push({ kind: 'no-text', status: c?.status ?? c?.stop_reason ?? null, incomplete: c?.incomplete_details ?? null });
-      } catch (e) {
         // 拒答是模型给出的结果，不是调用失败：记一次未通过，再问一次（正式评分仍不接受拒答）
-        if (e.refusal) {
+        if (c?.stop_reason === 'refusal') {
           canary.push({ kind: 'refusal' });
           continue;
         }
+        const said = outputText(provider, c);
+        if (canaryOk(said)) passed = true;
+        else if (said.trim()) canary.push({ kind: 'wrong', answer: scrub(said, CANARY_ANSWER_MAX) });
+        else canary.push({ kind: 'no-text', status: c?.status ?? c?.stop_reason ?? null, incomplete: c?.incomplete_details ?? null });
+      } catch (e) {
         // 第一次就调用失败（已按退避重试过）是基础设施问题，照常报“评分失败”；第二次失败时保留第一次的回答
         if (k === 0) throw e;
-        canary.push({ kind: 'call-failed', error: String(e.message).split('\n')[0].slice(0, 300) });
+        canary.push({ kind: 'call-failed', error: scrub(oneLine(e.message), 300) });
       }
     }
     if (!passed) {
       const kinds = { wrong: '答错', 'no-text': '没有文字输出', refusal: '拒答', 'call-failed': '调用失败' };
-      return { verdict: 'error', reason: `多模态自检失败：${model} 两次都没有通过（${canary.map((x) => kinds[x.kind]).join('、')}；模型原话见运行摘要）`, canary, ...names };
+      return withCanary({ verdict: 'error', reason: `多模态自检失败：${model} 两次都没有通过（${canary.map((x) => kinds[x.kind]).join('、')}；模型原话见运行摘要）`, ...names });
     }
     const body = await call(toRequest(provider, { model, effort: cfg.effort, parts: buildParts({ style: fs.readFileSync(stylePath, 'utf8'), title, shots, baseline, reference }) }));
-    return { ...judge(parseVerdict(outputText(provider, body)), cfg), ...names, usage: body.usage ?? null };
+    if (body?.stop_reason === 'refusal') throw failure('模型拒绝回答');
+    let verdict;
+    try {
+      verdict = parseVerdict(outputText(provider, body));
+    } catch (e) {
+      throw failure('模型回复不是合格的评分 JSON', e.message);
+    }
+    return withCanary({ ...judge(verdict, cfg), ...names, usage: body.usage ?? null });
   } catch (e) {
-    return { verdict: 'error', reason: `评分失败：${String(e.message).split('\n')[0]}`, ...names };
+    // reason 会写进机器人评论：只用本地生成的短句（不含服务返回正文或模型原话）；详情进 error 字段（运行摘要与产物）
+    return withCanary({ verdict: 'error', reason: `评分失败：${e.reason ?? '内部错误'}`, error: scrub(oneLine(e.message), 500), ...names });
   }
 }
 

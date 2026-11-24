@@ -63,9 +63,9 @@ export function acceptanceState({ events, owner, label, markers, head }) {
   return Date.parse(last.created_at) > Date.parse(wait.at) ? 'accepted' : 'stale';
 }
 
-/** 已有几轮视觉验收未达标（以评论计） */
-/** 已有几轮视觉验收未达标：只数云端身份（github-actions）发的报告，别人仿写同样开头的评论不算，免得被人耗光修复轮次 */
-export const visualRounds = (comments) => comments.filter((c) => CLOUD_REVIEWER_LOGINS.includes(c.author) && c.body.startsWith(VISUAL_PREFIX) && c.body.includes('结论：未达标')).length;
+/** 已有几轮视觉验收未达标（以评论计）：只数云端身份（github-actions）发的报告，别人仿写同样开头的评论不算，免得被人耗光修复轮次；
+ *  只认行首的“结论：未达标”（评分意见每条以“- ”开头且已压成一行，模型写的字样不会落在行首） */
+export const visualRounds = (comments) => comments.filter((c) => CLOUD_REVIEWER_LOGINS.includes(c.author) && c.body.startsWith(VISUAL_PREFIX) && /^结论：未达标/m.test(c.body)).length;
 
 export const runIdOf = (url) => /\/actions\/runs\/(\d+)/.exec(url ?? '')?.[1] ?? null;
 

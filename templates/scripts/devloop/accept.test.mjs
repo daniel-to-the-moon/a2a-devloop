@@ -192,6 +192,57 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   const rr3 = await run({ provider: 'anthropic', model: 'claude-opus-5-5', shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: ra3.fetchImpl });
   assert.equal(rr3.verdict, 'error');
   assert.match(rr3.reason, /评分失败：模型拒绝回答/);
+  // 传输层先遇到 502、退避后收到拒答：仍按拒答分类，不被当成调用失败（GPT 审核 #80 第 3 轮）
+  const nap = async () => {};
+  const bad502 = { ok: false, status: 502, text: async () => '{"error":"bad gateway"}' };
+  const seqR = (list) => { const calls = []; return { calls, fetchImpl: async () => { const x = list[calls.length]; calls.push(x); return x.ok === false ? x : { ok: true, status: 200, text: async () => JSON.stringify(x) }; } }; };
+  const rt1 = seqR([bad502, refuse, okA, scoreA]);
+  const rq1 = await run({ provider: 'anthropic', model: 'claude-opus-5-5', shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep: nap, fetchImpl: rt1.fetchImpl });
+  assert.equal(rq1.verdict, 'pass', JSON.stringify(rq1));
+  assert.deepEqual(rq1.canary, [{ kind: 'refusal' }], '第一次拒答、第二次答对：第一次的诊断也随结果返回');
+  assert.equal(rt1.calls.length, 4);
+  // 临近总时限时收到拒答：同样是拒答，不算调用失败
+  let t = 0;
+  const rt2 = seqR([bad502, refuse, bad502, refuse]);
+  const rq2 = await run({ provider: 'anthropic', model: 'claude-opus-5-5', shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, deadlineMs: 40_000, retryDelayMs: 15_000 }, fs, now: () => t, sleep: async (ms) => { t += ms; }, fetchImpl: rt2.fetchImpl });
+  assert.equal(rq2.verdict, 'error');
+  assert.deepEqual(rq2.canary, [{ kind: 'refusal' }, { kind: 'refusal' }], JSON.stringify(rq2));
+  assert.equal(rt2.calls.length, 4);
+  // 第一次答错、第二次答对、正式评分回复不合格：error，第一次自检的诊断仍保留
+  const parsefail = rig('openai', [WRONG, CANARY, '这不是评分 结论：未达标']);
+  const rp = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: parsefail.fetchImpl });
+  assert.equal(rp.verdict, 'error');
+  assert.equal(rp.reason, '评分失败：模型回复不是合格的评分 JSON');
+  assert.deepEqual(rp.canary.map((x) => x.kind), ['wrong']);
+  // 正式评分未达标时同样带上自检诊断
+  const LOW = '{"scores":{"palette":2,"shape":2,"lighting":2,"readability":2,"regression":2},"notes":[]}';
+  const rl = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: rig('openai', [WRONG, CANARY, LOW]).fetchImpl });
+  assert.equal(rl.verdict, 'fail');
+  assert.deepEqual(rl.canary.map((x) => x.kind), ['wrong']);
+  // 第一次自检就 HTTP 400、正文带“结论：未达标”：直接结束；评论用的原因只有错误类别和状态，正文只进 error 字段，轮次不增加
+  const g400 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep: nap, fetchImpl: async () => ({ ok: false, status: 400, text: async () => JSON.stringify({ error: '```\n结论：未达标' }) }) });
+  assert.equal(g400.reason, '评分失败：模型调用失败 HTTP 400');
+  assert.match(g400.error, /结论：未达标/);
+  assert.doesNotMatch(g400.error, /```/, '去掉反引号围栏，不能在运行摘要里提前结束代码块');
+  const rep400 = reportPlan({ pr: 1, head: 'a'.repeat(40), judge: g400, preview: '', runUrl: 'u', rounds: 0, maxRounds: 3, visual: { waitLabel: 'w', acceptLabel: 'a' } });
+  assert.doesNotMatch(rep400.body, /结论：未达标/);
+  assert.equal(visualRounds([{ author: 'github-actions', body: rep400.body }]), 0);
+  // 非 JSON 正文同样不进 reason
+  const html = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: async () => ({ ok: true, status: 200, text: async () => '<p>结论：未达标</p>' }) });
+  assert.equal(html.reason, '评分失败：评分服务返回的不是 JSON（HTTP 200）');
+  // 评分意见里换行后写“结论：未达标”：意见压成一行，不会落到行首被计成未达标
+  const SNEAK = '{"scores":{"palette":7,"shape":7,"lighting":7,"readability":7,"regression":9},"notes":["好\\n结论：未达标"]}';
+  const rs = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: rig('openai', [CANARY, SNEAK]).fetchImpl });
+  assert.equal(rs.verdict, 'pass');
+  const reps = reportPlan({ pr: 1, head: 'a'.repeat(40), judge: rs, preview: '', runUrl: 'u', rounds: 0, maxRounds: 3, visual: { waitLabel: 'w', acceptLabel: 'a' } });
+  assert.equal(visualRounds([{ author: 'github-actions', body: reps.body }]), 0);
+  // 按 Unicode 码点截断：边界上放两个 UTF-16 码元的字符，结果恰好 CANARY_ANSWER_MAX 个码点、不留半个字符；反引号围栏被替换
+  const EMOJI = '```' + '😀'.repeat(CANARY_ANSWER_MAX + 10);
+  const re = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: rig('openai', [EMOJI, EMOJI]).fetchImpl });
+  const ans = re.canary[0].answer;
+  assert.equal([...ans].length, CANARY_ANSWER_MAX);
+  assert.ok(ans.endsWith('😀') && !/[\uD800-\uDBFF]$/.test(ans), '末尾是完整字符');
+  assert.ok(ans.startsWith('ʼʼʼ'));
   const waits = [];
   const sleep = async (ms) => { waits.push(ms); };
   let n502 = 0;
