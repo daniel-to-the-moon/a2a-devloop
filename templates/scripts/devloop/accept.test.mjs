@@ -192,6 +192,17 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   const rr3 = await run({ provider: 'anthropic', model: 'claude-opus-5-5', shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: ra3.fetchImpl });
   assert.equal(rr3.verdict, 'error');
   assert.match(rr3.reason, /评分失败：模型拒绝回答/);
+  // Responses API 的拒答在内容项 type=refusal：自检记为拒答并再问，正式评分报拒答（不是“格式不对”）
+  const refuseO = { status: 'completed', output: [{ type: 'message', content: [{ type: 'refusal', refusal: '不能协助' }] }] };
+  const okO = { output: [{ content: [{ type: 'output_text', text: CANARY }] }] };
+  const scoreO = { output: [{ content: [{ type: 'output_text', text: SCORE }] }] };
+  const ro1 = seqA([refuseO, okO, scoreO]);
+  const rq0 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: ro1.fetchImpl });
+  assert.equal(rq0.verdict, 'pass', JSON.stringify(rq0));
+  assert.deepEqual(rq0.canary, [{ kind: 'refusal' }]);
+  assert.equal(ro1.calls.length, 3);
+  const rq00 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: seqA([okO, refuseO]).fetchImpl });
+  assert.equal(rq00.reason, '评分失败：模型拒绝回答');
   // 传输层先遇到 502、退避后收到拒答：仍按拒答分类，不被当成调用失败（GPT 审核 #80 第 3 轮）
   const nap = async () => {};
   const bad502 = { ok: false, status: 502, text: async () => '{"error":"bad gateway"}' };
@@ -236,6 +247,11 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   assert.equal(rs.verdict, 'pass');
   const reps = reportPlan({ pr: 1, head: 'a'.repeat(40), judge: rs, preview: '', runUrl: 'u', rounds: 0, maxRounds: 3, visual: { waitLabel: 'w', acceptLabel: 'a' } });
   assert.equal(visualRounds([{ author: 'github-actions', body: reps.body }]), 0);
+  // 旧版报告：评分意见没压成一行、换行后以“结论：未达标”开头；只看最后的正式结论，不计数。真实的未达标报告仍计一次
+  const oldPass = [`${VISUAL_PREFIX}`, '', '评分意见：', '- 好', '结论：未达标（伪造）', '', '结论：模型评分达标，等你拍板。满意就加 `accepted`。', '', '@someone 请看预览'].join('\n');
+  assert.equal(visualRounds([{ author: 'github-actions', body: oldPass }]), 0);
+  const realFail = reportPlan({ pr: 1, head: 'a'.repeat(40), judge: rl, preview: '', runUrl: 'u', rounds: 0, maxRounds: 3, visual: { waitLabel: 'w', acceptLabel: 'a' } });
+  assert.equal(visualRounds([{ author: 'github-actions', body: oldPass }, { author: 'github-actions', body: realFail.body }]), 1);
   // 按 Unicode 码点截断：边界上放两个 UTF-16 码元的字符，结果恰好 CANARY_ANSWER_MAX 个码点、不留半个字符；反引号围栏被替换
   const EMOJI = '```' + '😀'.repeat(CANARY_ANSWER_MAX + 10);
   const re = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: rig('openai', [EMOJI, EMOJI]).fetchImpl });
@@ -249,7 +265,7 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   const down = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep, fetchImpl: async () => { n502++; return { ok: false, status: 502, text: async () => JSON.stringify({ error: 'bad gateway' }) }; } });
   assert.equal(down.verdict, 'error');
   assert.equal(n502, 3, '5xx 退避重试到上限');
-  assert.match(down.reason, /HTTP 502.*已重试 3 次/);
+  assert.equal(down.reason, '评分失败：模型调用失败 HTTP 502（共尝试 3 次）', '报总尝试次数（重试了 2 次）');
   // 网络错误：报出 cause 里的真实原因与主机名，并重试；恢复后照常评分
   const netErr = Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('getaddrinfo ENOTFOUND gw.example'), { code: 'ENOTFOUND' }) });
   const flaky = rig('openai', [CANARY, SCORE]);
@@ -258,7 +274,11 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   assert.equal(rec.verdict, 'pass', JSON.stringify(rec));
   assert.deepEqual(waits.slice(0, 2), [15000, 30000], '退避递增');
   const dead = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, retries: 2 }, fs, sleep, fetchImpl: async () => { throw netErr; } });
-  assert.match(dead.reason, /连不上评分服务 .*ENOTFOUND.*已重试 2 次/);
+  // 评论用的原因只有类别与尝试次数；主机名、底层异常只在 error 详情里
+  assert.equal(dead.reason, '评分失败：连不上评分服务（共尝试 2 次）');
+  assert.match(dead.error, /连不上评分服务 gw：.*ENOTFOUND.*共尝试 2 次/);
+  const repDead = reportPlan({ pr: 1, head: 'a'.repeat(40), judge: dead, preview: '', runUrl: 'u', rounds: 0, maxRounds: 3, visual: { waitLabel: 'w', acceptLabel: 'a' } });
+  assert.doesNotMatch(repDead.body, /ENOTFOUND|gw\.example|\bgw\b/);
   // 响应头已到、读响应体时超时或连接中断：同样重试，并报出原因（GPT 审核 #74 第 1 轮 major）
   for (const err of [Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }), Object.assign(new TypeError('terminated'), { cause: Object.assign(new Error('other side closed'), { code: 'ECONNRESET' }) })]) {
     const ok = rig('openai', [CANARY, SCORE]);
@@ -266,7 +286,9 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
     const rb2 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep, fetchImpl: async (u, i) => (broken++ < 1 ? { ok: true, status: 200, text: async () => { throw err; } } : ok.fetchImpl(u, i)) });
     assert.equal(rb2.verdict, 'pass', JSON.stringify(rb2));
     const dead2 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, retries: 2 }, fs, sleep, fetchImpl: async () => ({ ok: true, status: 200, text: async () => { throw err; } }) });
-    assert.match(dead2.reason, /读取评分服务响应失败 .*(超时|ECONNRESET).*已重试 2 次/);
+    assert.match(dead2.reason, /^评分失败：读取评分服务响应失败（HTTP 200(，超时)?）（共尝试 2 次）$/);
+    assert.doesNotMatch(dead2.reason, /ECONNRESET|other side closed|\bgw\b/);
+    assert.match(dead2.error, /读取评分服务响应失败 gw（HTTP 200）：.*(超时|ECONNRESET)/);
   }
   // 总时限：自检重试后恢复、正式评分又一直超时，到截止时间就停下返回 error（不被任务超时取消）
   let clock = 0;
@@ -277,7 +299,7 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   const late = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, deadlineMs: 600_000, timeoutMs: 300_000 }, fs, sleep: tick, now: () => clock,
     fetchImpl: async (u, i) => { k++; seen.push(i.signal); clock += 300_000; if (k === 2) return rig('openai', [CANARY]).fetchImpl(u, i); throw slow; } });
   assert.equal(late.verdict, 'error');
-  assert.match(late.reason, /已到总时限|超出总时限/);
+  assert.match(late.reason, /剩余时间不够再试|超出总时限/);
   assert.ok(clock <= 600_000 + 300_000, `不超过截止时间太多：${clock}`);
   assert.ok(k <= 3, `到时限就不再发请求：${k}`);
   // 200 但不是 JSON：格式错误，不重试
@@ -289,6 +311,17 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   let n401 = 0;
   await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep, fetchImpl: async () => { n401++; return { ok: false, status: 401, text: async () => '{}' }; } });
   assert.equal(n401, 1);
+  // 临近总时限时首次就收到不可重试的 4xx：照实报 HTTP 状态，不说重试过、也不说到了时限
+  let tt = 0;
+  const near = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, deadlineMs: 10_000, retryDelayMs: 15_000 }, fs, now: () => tt, sleep: async (ms) => { tt += ms; }, fetchImpl: async () => ({ ok: false, status: 400, text: async () => '{}' }) });
+  assert.equal(near.reason, '评分失败：模型调用失败 HTTP 400');
+  // 可重试的 502、但剩余时间放不下下一次退避：只尝试 1 次，并说明原因
+  const near2 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, deadlineMs: 10_000, retryDelayMs: 15_000 }, fs, now: () => tt, sleep: async (ms) => { tt += ms; }, fetchImpl: async () => ({ ok: false, status: 502, text: async () => '{}' }) });
+  assert.equal(near2.reason, '评分失败：模型调用失败 HTTP 502（共尝试 1 次，剩余时间不够再试）');
+  // 非 2xx 且正文不是 JSON（网关 HTML 502）：正文进 error 详情，reason 只有状态
+  const gw502 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, retries: 1 }, fs, sleep, fetchImpl: async () => ({ ok: false, status: 502, text: async () => '<html>Bad Gateway from edge-7</html>' }) });
+  assert.equal(gw502.reason, '评分失败：模型调用失败 HTTP 502（共尝试 1 次）');
+  assert.match(gw502.error, /<html>Bad Gateway from edge-7<\/html>/);
   const nomodel = await run({ shotsDir: '/d', stylePath: '/style', env: { OPENAI_API_KEY: 'k' }, cfg: { ...cfg, model: '' }, fs, fetchImpl: g.fetchImpl });
   assert.match(nomodel.reason, /没有配置评分模型/);
   assert.equal((await run({ provider: 'x', shotsDir: '/d', stylePath: '/style', env, cfg, fs })).verdict, 'error');

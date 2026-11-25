@@ -63,9 +63,11 @@ export function acceptanceState({ events, owner, label, markers, head }) {
   return Date.parse(last.created_at) > Date.parse(wait.at) ? 'accepted' : 'stale';
 }
 
-/** 已有几轮视觉验收未达标（以评论计）：只数云端身份（github-actions）发的报告，别人仿写同样开头的评论不算，免得被人耗光修复轮次；
- *  只认行首的“结论：未达标”（评分意见每条以“- ”开头且已压成一行，模型写的字样不会落在行首） */
-export const visualRounds = (comments) => comments.filter((c) => CLOUD_REVIEWER_LOGINS.includes(c.author) && c.body.startsWith(VISUAL_PREFIX) && /^结论：未达标/m.test(c.body)).length;
+/** 已有几轮视觉验收未达标（以评论计）：只数云端身份（github-actions）发的报告，别人仿写同样开头的评论不算，免得被人耗光修复轮次。
+ *  只看报告模板生成的正式结论：reportPlan 把“结论：…”放在评分意见之后、作为最后一行以“结论：”开头的行（后面只有 @提醒）。
+ *  旧版报告的评分意见可能换行后以“结论：未达标”开头，但它在正式结论之前，不会被当成结论 */
+export const reportConclusion = (body) => String(body).split('\n').filter((l) => l.startsWith('结论：')).pop() ?? '';
+export const visualRounds = (comments) => comments.filter((c) => CLOUD_REVIEWER_LOGINS.includes(c.author) && c.body.startsWith(VISUAL_PREFIX) && reportConclusion(c.body).startsWith('结论：未达标')).length;
 
 export const runIdOf = (url) => /\/actions\/runs\/(\d+)/.exec(url ?? '')?.[1] ?? null;
 

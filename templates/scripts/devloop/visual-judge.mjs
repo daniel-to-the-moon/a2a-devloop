@@ -86,6 +86,12 @@ export function toRequest(provider, { model, effort, parts, system = SYSTEM }) {
   throw new Error(`未知的评分服务：${provider}`);
 }
 
+/** 结构化拒答：Anthropic 是 stop_reason=refusal；Responses API 是内容项 type=refusal（outputText 会滤掉它） */
+export function isRefusal(provider, body) {
+  if (provider === 'openai') return (body?.output ?? []).some((o) => (o.content ?? []).some((c) => c.type === 'refusal'));
+  return body?.stop_reason === 'refusal';
+}
+
 /** 回复里的文字 */
 export function outputText(provider, body) {
   if (provider === 'openai') return (body?.output ?? []).flatMap((o) => o.content ?? []).filter((c) => c.type === 'output_text').map((c) => c.text).join('\n');
@@ -118,7 +124,9 @@ export function canaryPng() {
 }
 /** 自检答错时 canary 字段里保留的原话长度（按字符计，超出截断）；原话只进运行摘要与产物，不进评论 */
 export const CANARY_ANSWER_MAX = 500;
-/** 外部文字（模型原话、服务返回的正文）写进诊断字段前的处理：去掉三个及以上的反引号（运行摘要里用 ```json 围住），按字符截断 */
+/** 外部文字（模型原话、服务返回的正文）写进诊断字段前的处理：按 Unicode 码点截断，并把三个及以上的反引号换掉。
+ *  运行摘要里不会被提前结束代码块，真正靠的是 accept.yml 用 jq 输出：字符串带引号、带缩进，换行被转义，凑不出行首的围栏；
+ *  这里换反引号只是多一层保险，只用在诊断字段（canary / error）上 */
 export const scrub = (s, max) => [...String(s ?? '').replace(/`{3,}/g, (m) => 'ʼ'.repeat(m.length))].slice(0, max).join('');
 /** 调用失败：reason 是本地生成、只含错误类别与 HTTP 状态的短句（会进评论）；message 是带服务返回正文的详情（只进诊断字段） */
 const failure = (reason, detail = reason, extra = {}) => Object.assign(new Error(detail), { reason, ...extra });
@@ -205,23 +213,27 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
     try {
       r = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(Math.min(cfg.timeoutMs ?? 300000, left())) });
     } catch (e) {
-      throw failure(oneLine(`连不上评分服务 ${new URL(url).host}：${netReason(e)}`), undefined, { transient: true });
+      // reason 只写类别；主机名与底层异常（可能含内部地址）只进诊断详情
+      throw failure(`连不上评分服务${e?.name === 'TimeoutError' ? '（超时）' : ''}`, oneLine(`连不上评分服务 ${new URL(url).host}：${netReason(e)}`), { transient: true });
     }
     // 响应头到了不等于响应体也能读完：读响应体时的超时、连接中断同样算暂时故障；读完但不是 JSON 才是格式错误
     let text;
     try {
       text = await r.text();
     } catch (e) {
-      throw failure(oneLine(`读取评分服务响应失败 ${new URL(url).host}（HTTP ${r.status}）：${netReason(e)}`), undefined, { transient: true });
+      throw failure(`读取评分服务响应失败（HTTP ${r.status}${e?.name === 'TimeoutError' ? '，超时' : ''}）`, oneLine(`读取评分服务响应失败 ${new URL(url).host}（HTTP ${r.status}）：${netReason(e)}`), { transient: true });
     }
     let body = {};
+    let parsed = true;
     try {
       body = text ? JSON.parse(text) : {};
     } catch {
-      if (r.ok) throw failure(`评分服务返回的不是 JSON（HTTP ${r.status}）`, `评分服务返回的不是 JSON（HTTP ${r.status}）：${text.slice(0, 200)}`);
+      parsed = false;
+      if (r.ok) throw failure(`评分服务返回的不是 JSON（HTTP ${r.status}）`, `评分服务返回的不是 JSON（HTTP ${r.status}）：${text.slice(0, 300)}`);
     }
-    if (!r.ok) throw failure(`模型调用失败 HTTP ${r.status}`, `模型调用失败 HTTP ${r.status}：${JSON.stringify(body?.error ?? body).slice(0, 300)}`, { transient: r.status === 429 || r.status >= 500 });
-    // 拒答（Anthropic HTTP 200、stop_reason=refusal）是模型给出的结果，不在传输层当错误处理，由调用方按场景判定
+    // 非 2xx：正文（JSON 的 error 字段，或 HTML / 纯文本原文）只进诊断详情
+    if (!r.ok) throw failure(`模型调用失败 HTTP ${r.status}`, `模型调用失败 HTTP ${r.status}：${parsed ? JSON.stringify(body?.error ?? body).slice(0, 300) : text.slice(0, 300)}`, { transient: r.status === 429 || r.status >= 500 });
+    // 拒答是模型给出的结果（HTTP 200），不在传输层当错误处理，由调用方用 isRefusal 按场景判定
     return body;
   };
   const call = async (payload) => {
@@ -229,11 +241,13 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
       try {
         return await once(payload);
       } catch (e) {
+        // 不可重试的错误（4xx、格式错误、已过总时限）原样抛出；可重试的到次数上限、或剩余时间放不下下一次退避时停下，
+        // 报总尝试次数（i 次 = 重试了 i - 1 次）
+        if (!e.transient) throw e;
         const wait = (cfg.retryDelayMs ?? 15000) * i;
-        const outOfTime = left() - wait <= 0;
-        if (!e.transient || i >= attempts || outOfTime) {
-          if (i === 1 && !outOfTime) throw e;
-          const tail = `（已重试 ${i} 次${outOfTime ? '，已到总时限' : ''}）`;
+        const noRoom = left() - wait <= 0;
+        if (i >= attempts || noRoom) {
+          const tail = `（共尝试 ${i} 次${i < attempts && noRoom ? '，剩余时间不够再试' : ''}）`;
           throw failure(`${e.reason ?? '调用失败'}${tail}`, `${e.message}${tail}`);
         }
         console.error(`第 ${i} 次调用失败，稍后重试：${e.message}`);
@@ -253,7 +267,7 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
       try {
         const c = await call(toRequest(provider, { model, parts: canaryParts(), system: '' }));
         // 拒答是模型给出的结果，不是调用失败：记一次未通过，再问一次（正式评分仍不接受拒答）
-        if (c?.stop_reason === 'refusal') {
+        if (isRefusal(provider, c)) {
           canary.push({ kind: 'refusal' });
           continue;
         }
@@ -272,7 +286,7 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
       return withCanary({ verdict: 'error', reason: `多模态自检失败：${model} 两次都没有通过（${canary.map((x) => kinds[x.kind]).join('、')}；模型原话见运行摘要）`, ...names });
     }
     const body = await call(toRequest(provider, { model, effort: cfg.effort, parts: buildParts({ style: fs.readFileSync(stylePath, 'utf8'), title, shots, baseline, reference }) }));
-    if (body?.stop_reason === 'refusal') throw failure('模型拒绝回答');
+    if (isRefusal(provider, body)) throw failure('模型拒绝回答');
     let verdict;
     try {
       verdict = parseVerdict(outputText(provider, body));
