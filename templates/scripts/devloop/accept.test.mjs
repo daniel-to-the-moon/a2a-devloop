@@ -245,6 +245,7 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   const SNEAK = '{"scores":{"palette":7,"shape":7,"lighting":7,"readability":7,"regression":9},"notes":["好\\n结论：未达标"]}';
   const rs = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: rig('openai', [CANARY, SNEAK]).fetchImpl });
   assert.equal(rs.verdict, 'pass');
+  assert.deepEqual(rs.notes, ['好 结论：未达标'], '评分意见里的换行压成空格');
   const reps = reportPlan({ pr: 1, head: 'a'.repeat(40), judge: rs, preview: '', runUrl: 'u', rounds: 0, maxRounds: 3, visual: { waitLabel: 'w', acceptLabel: 'a' } });
   assert.equal(visualRounds([{ author: 'github-actions', body: reps.body }]), 0);
   // 旧版报告：评分意见没压成一行、换行后以“结论：未达标”开头；只看最后的正式结论，不计数。真实的未达标报告仍计一次
@@ -322,6 +323,32 @@ test('评分：默认 GPT（Responses API），可配置为 Claude；先过多�
   const gw502 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, retries: 1 }, fs, sleep, fetchImpl: async () => ({ ok: false, status: 502, text: async () => '<html>Bad Gateway from edge-7</html>' }) });
   assert.equal(gw502.reason, '评分失败：模型调用失败 HTTP 502（共尝试 1 次）');
   assert.match(gw502.error, /<html>Bad Gateway from edge-7<\/html>/);
+  // 多行纯文本 502 后重试：退避日志只写本地简述，正文（可能含独立成行的 ::工作流命令）不进 stderr
+  const logged = [];
+  const origErr = console.error;
+  console.error = (...a) => logged.push(a.join(' '));
+  let nml = 0;
+  try {
+    await run({ shotsDir: '/d', stylePath: '/style', env, cfg: { ...cfg, retries: 2 }, fs, sleep, fetchImpl: async () => { nml++; return { ok: false, status: 502, text: async () => 'oops\n::warning::injected\n' }; } });
+  } finally {
+    console.error = origErr;
+  }
+  assert.equal(nml, 2);
+  assert.ok(logged.length >= 1);
+  assert.ok(logged.every((l) => !l.includes('injected') && !l.includes('::')), JSON.stringify(logged));
+  // 502 之后收到 401：报 HTTP 401 和总尝试次数，不说“剩余时间不够再试”
+  let n5 = 0;
+  const r54 = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep, fetchImpl: async () => (++n5 === 1 ? { ok: false, status: 502, text: async () => '{}' } : { ok: false, status: 401, text: async () => '{}' }) });
+  assert.equal(r54.reason, '评分失败：模型调用失败 HTTP 401（共尝试 2 次）');
+  // 第一次自检答错、第二次 HTTP 400：评论原因带本地简述（HTTP 状态），不带服务正文
+  let n6 = 0;
+  const r2f = await run({ shotsDir: '/d', stylePath: '/style', env, cfg, fs, sleep, fetchImpl: async () => (++n6 === 1 ? { ok: true, status: 200, text: async () => JSON.stringify({ output: [{ content: [{ type: 'output_text', text: 'red' }] }] }) } : { ok: false, status: 400, text: async () => '{"error":"secret-body"}' }) });
+  assert.match(r2f.reason, /两次都没有通过（答错、调用失败：模型调用失败 HTTP 400；/);
+  assert.doesNotMatch(r2f.reason, /secret-body/);
+  assert.equal(r2f.canary[1].reason, '模型调用失败 HTTP 400');
+  // 模型名（来自仓库变量或手动输入）进 reason 前压成一行、限长
+  const rmn = await run({ model: 'm\n结论：未达标', shotsDir: '/d', stylePath: '/style', env, cfg, fs, fetchImpl: rig('openai', ['red', 'red']).fetchImpl });
+  assert.doesNotMatch(rmn.reason, /\n/);
   const nomodel = await run({ shotsDir: '/d', stylePath: '/style', env: { OPENAI_API_KEY: 'k' }, cfg: { ...cfg, model: '' }, fs, fetchImpl: g.fetchImpl });
   assert.match(nomodel.reason, /没有配置评分模型/);
   assert.equal((await run({ provider: 'x', shotsDir: '/d', stylePath: '/style', env, cfg, fs })).verdict, 'error');

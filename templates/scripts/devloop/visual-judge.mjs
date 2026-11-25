@@ -241,16 +241,17 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
       try {
         return await once(payload);
       } catch (e) {
-        // 不可重试的错误（4xx、格式错误、已过总时限）原样抛出；可重试的到次数上限、或剩余时间放不下下一次退避时停下，
-        // 报总尝试次数（i 次 = 重试了 i - 1 次）
-        if (!e.transient) throw e;
+        // 停下时报总尝试次数（i 次 = 重试了 i - 1 次）；第一次就是不可重试的错误（4xx、格式错误、已过总时限）则原样抛出。
+        // 只有可重试的错误才可能因为剩余时间放不下下一次退避而停下
         const wait = (cfg.retryDelayMs ?? 15000) * i;
-        const noRoom = left() - wait <= 0;
-        if (i >= attempts || noRoom) {
+        const noRoom = Boolean(e.transient) && left() - wait <= 0;
+        if (!e.transient || i >= attempts || noRoom) {
+          if (i === 1 && !noRoom && !e.transient) throw e;
           const tail = `（共尝试 ${i} 次${i < attempts && noRoom ? '，剩余时间不够再试' : ''}）`;
           throw failure(`${e.reason ?? '调用失败'}${tail}`, `${e.message}${tail}`);
         }
-        console.error(`第 ${i} 次调用失败，稍后重试：${e.message}`);
+        // 日志只写本地生成的简述：服务返回的正文可能有多行，独立成行的 “::…” 会被 Actions runner 当成工作流命令
+        console.error(`第 ${i} 次调用失败，稍后重试：${e.reason ?? '调用失败'}`);
         await sleep(wait);
       }
     }
@@ -278,12 +279,15 @@ export async function run({ provider = 'openai', model: modelArg, shotsDir, base
       } catch (e) {
         // 第一次就调用失败（已按退避重试过）是基础设施问题，照常报“评分失败”；第二次失败时保留第一次的回答
         if (k === 0) throw e;
-        canary.push({ kind: 'call-failed', error: scrub(oneLine(e.message), 300) });
+        // reason 是本地简述（类别、HTTP 状态、尝试次数），可以进评论；error 是详情，可能带网关主机名（来自仓库变量，
+        // 运行摘要只有仓库协作者能看，按诊断数据处理）
+        canary.push({ kind: 'call-failed', reason: e.reason ?? '调用失败', error: scrub(oneLine(e.message), 300) });
       }
     }
     if (!passed) {
       const kinds = { wrong: '答错', 'no-text': '没有文字输出', refusal: '拒答', 'call-failed': '调用失败' };
-      return withCanary({ verdict: 'error', reason: `多模态自检失败：${model} 两次都没有通过（${canary.map((x) => kinds[x.kind]).join('、')}；模型原话见运行摘要）`, ...names });
+      const what = canary.map((x) => (x.kind === 'call-failed' ? `${kinds[x.kind]}：${x.reason}` : kinds[x.kind])).join('、');
+      return withCanary({ verdict: 'error', reason: `多模态自检失败：${scrub(oneLine(model), 80)} 两次都没有通过（${what}；模型原话见运行摘要）`, ...names });
     }
     const body = await call(toRequest(provider, { model, effort: cfg.effort, parts: buildParts({ style: fs.readFileSync(stylePath, 'utf8'), title, shots, baseline, reference }) }));
     if (isRefusal(provider, body)) throw failure('模型拒绝回答');
