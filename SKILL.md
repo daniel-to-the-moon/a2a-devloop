@@ -101,6 +101,7 @@ PR 新提交 → [本机] watch：CI(一次性 runner 测合并后代码) ‖ GP
 3. 开关：`gh variable set CLOUD_REVIEW --body on`；`SECOND_REVIEW=off` 可关掉 Claude 那一方。先手动 `gh workflow run gpt-review.yml -f pr=<N>` 验证一次再开定时。
 4. 第二审核方只给 `Read,Glob,Grep`，diff 由工作流预先生成到只读目录；`--setting-sources user --strict-mcp-config` 不加载 PR 里的 `.claude/settings.json` 与 `.mcp.json`（否则 PR 可借钩子在持有 key 的环境里执行命令）。`combine-review.test.mjs` 读取真实 YAML 校验这些约束，升级 Claude Code 版本后要重新实测。
 5. 合并后 `decide` 用 `workflow_dispatch` 触发 `ci.yml -f deploy_main=true`（`GITHUB_TOKEN` 推 main 不触发 push 工作流）。
+6. 事件触发为主、定时兜底：`claude.yml` 的 `publish` 任务（不执行仓库代码）推送成功后用 `dispatch-review.sh` dispatch `gpt-review.yml -f pr=<N>`（需要该任务有 `actions: write`，仅 `CLOUD_REVIEW=on` 时运行，失败不影响发布）。只传 PR 编号，head/base 由 `select` 重新读取。人工提交、base 更新、解除 hold 没有可信事件入口，仍靠 `*/10` 的定时扫描；漏发率和扫描空转比例**未测量，待核实**，测完再决定是否降到每小时。不要把审核挂到 `pull_request` / `workflow_run` 上。
 
 ## 二·七、可选：浏览器冒烟验收
 
