@@ -194,6 +194,8 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      # 仅用于下面的 dispatch 步骤（触发 gpt-review.yml）；本任务不检出、不执行仓库代码
+      actions: write
     steps:
       - uses: actions/download-artifact@v4
         continue-on-error: true
@@ -221,6 +223,19 @@ jobs:
         run: |
           export PUSH_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
           bash _devloop/scripts/devloop/publish.sh
+      # 推送成功后立刻触发云端审核（只传 PR 编号，审核端重新读 head/base）；仅在 CLOUD_REVIEW=on 时。
+      # 尽力而为：失败不影响发布，定时兜底扫描仍会发现这个 PR。
+      - name: 触发云端审核
+        if: vars.CLOUD_REVIEW == 'on'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          N: ${{ github.event.issue.number || inputs.pr || inputs.issue }}
+          MODE: ${{ needs.work.outputs.mode }}
+          BRANCH: ${{ needs.work.outputs.branch }}
+          OUT: ${{ github.workspace }}/out
+        run: bash _devloop/scripts/devloop/dispatch-review.sh
       # 上一步任何命令失败（推送被拒、开 PR 失败、评论失败……）：发失败说明并加 needs-user，循环不会无声停滞
       #。这里同样不执行仓库代码。
       - name: 发布失败时报告

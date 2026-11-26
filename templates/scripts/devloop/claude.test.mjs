@@ -235,32 +235,40 @@ test('claude.yml：手动触发有 pr / issue 两个可选输入，二选一；�
  * install-bun.sh 行为测试：假 npm（按 plan 逐次成功 / 失败，成功时在 PATH 里放一个假 bun）、假 sleep（只记录秒数）。
  * plan 例：'fail,ok'；'ok-broken' 表示 npm 成功但装出的 bun 不能运行。
  */
-function runInstallBun(plan) {
+function runInstallBun(plan, { staleOnPath } = {}) {
   const dir = join(root, `bun-${n++}`);
   const bin = join(dir, 'bin');
-  const npmBin = join(dir, 'npm-global');
+  const prefix = join(dir, 'npm-prefix');
+  const npmBin = join(prefix, 'bin');
   mkdirSync(bin, { recursive: true });
   mkdirSync(npmBin, { recursive: true });
   writeFileSync(join(dir, 'plan'), plan.split(',').join('\n') + '\n');
   writeFileSync(
     join(bin, 'npm'),
     `#!/usr/bin/env bash
+if [ "$1" = prefix ]; then echo "${prefix}"; exit 0; fi
 echo "npm $*" >> "${dir}/log"
 step=$(head -n 1 "${dir}/plan"); sed -i.bak 1d "${dir}/plan"
 case "$step" in
   ok) printf '#!/usr/bin/env bash\\necho 1.4.4\\n' > "${npmBin}/bun"; chmod +x "${npmBin}/bun"; exit 0 ;;
+  ok-old) printf '#!/usr/bin/env bash\\necho 1.3.0\\n' > "${npmBin}/bun"; chmod +x "${npmBin}/bun"; exit 0 ;;
   ok-broken) printf '#!/usr/bin/env bash\\nexit 3\\n' > "${npmBin}/bun"; chmod +x "${npmBin}/bun"; exit 0 ;;
   *) exit 1 ;;
 esac
 `,
   );
+  if (staleOnPath) {
+    // 旧版 bun 留在 PATH 上：脚本不得把它当成本次安装的结果
+    writeFileSync(join(bin, 'bun'), '#!/usr/bin/env bash\necho 1.4.4\n');
+    chmodSync(join(bin, 'bun'), 0o755);
+  }
   writeFileSync(join(bin, 'sleep'), `#!/usr/bin/env bash\necho "sleep $1" >> "${dir}/log"\n`);
   chmodSync(join(bin, 'npm'), 0o755);
   chmodSync(join(bin, 'sleep'), 0o755);
   const out = join(dir, 'out');
   writeFileSync(out, '');
   const r = spawnSync('bash', [join(HERE, 'install-bun.sh')], {
-    env: { ...process.env, PATH: `${bin}:${npmBin}:/usr/bin:/bin`, GITHUB_OUTPUT: out },
+    env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, GITHUB_OUTPUT: out },
     encoding: 'utf8',
   });
   const log = existsSync(join(dir, 'log')) ? readFileSync(join(dir, 'log'), 'utf8').trim().split('\n') : [];
@@ -290,6 +298,24 @@ test('install-bun.sh：连续三次失败（或装出的 bun 不能运行）→ 
     assert.equal(r.log.filter((l) => l.startsWith('npm')).length, 3, plan);
     assert.deepEqual(r.log.filter((l) => l.startsWith('sleep')), ['sleep 15', 'sleep 30'], plan); // 最后一次失败后不再等待
   }
+});
+
+test('install-bun.sh：装出的版本与 BUN_VERSION 不符 → 失败、不输出路径', () => {
+  const r = runInstallBun('ok-old,ok-old,ok-old');
+  assert.notEqual(r.code, 0);
+  assert.equal(r.out, '');
+});
+
+test('install-bun.sh：npm 没装成、PATH 上却有 bun → 不采用 PATH 上的，失败且不输出路径', () => {
+  const r = runInstallBun('fail,fail,fail', { staleOnPath: true });
+  assert.notEqual(r.code, 0);
+  assert.equal(r.out, '');
+});
+
+test('install-bun.sh：路径来自 npm 全局前缀，而非 PATH 上排在前面的另一个 bun', () => {
+  const r = runInstallBun('ok', { staleOnPath: true });
+  assert.equal(r.code, 0);
+  assert.equal(r.out, `path=${join(r.npmBin, 'bun')}\n`);
 });
 
 test('claude.yml：action 之前运行 install-bun.sh，并把它输出的路径交给 path_to_bun_executable', () => {
@@ -391,4 +417,55 @@ test('claude.yml：审核评论默认触发修复；DEVLOOP_REVIEWER=off 或暂�
   const stranger = reviewComment();
   stranger.github.event.comment.user.login = 'someone-else';
   assert.equal(workRuns(stranger), false);
+});
+
+/** dispatch-review.sh：假 gh 记录参数；pr list 输出 FAKE_PR_NUM */
+function runDispatch({ outcome = 'pr', mode = 'new', N = '7', pr = '12', ghExit = 0 }) {
+  const dir = join(root, `disp-${n++}`);
+  const bin = join(dir, 'bin');
+  const out = join(dir, 'out');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(out, { recursive: true });
+  writeFileSync(join(out, 'outcome'), outcome + '\n');
+  writeFileSync(join(bin, 'gh'), `#!/usr/bin/env bash\necho "$*" >> "${dir}/log"\nif [ "$1 $2" = "pr list" ]; then printf '%s' "${pr}"; exit 0; fi\nexit ${ghExit}\n`);
+  chmodSync(join(bin, 'gh'), 0o755);
+  const r = spawnSync('bash', [join(HERE, 'dispatch-review.sh')], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, OUT: out, REPO: 'o/r', N, MODE: mode, BRANCH: 'claude/issue-7' },
+    encoding: 'utf8',
+  });
+  const log = existsSync(join(dir, 'log')) ? readFileSync(join(dir, 'log'), 'utf8').trim().split('\n') : [];
+  return { code: r.status, log };
+}
+
+test('dispatch-review.sh：新 PR → 查出编号后只触发该 PR 的审核', () => {
+  const r = runDispatch({ mode: 'new', pr: '12' });
+  assert.equal(r.code, 0);
+  assert.equal(r.log.at(-1), 'workflow run gpt-review.yml -R o/r --ref main -f pr=12');
+});
+
+test('dispatch-review.sh：修复模式直接用 N，不查 PR 列表', () => {
+  const r = runDispatch({ mode: 'fix', N: '9' });
+  assert.deepEqual(r.log, ['workflow run gpt-review.yml -R o/r --ref main -f pr=9']);
+});
+
+test('dispatch-review.sh：没有推送（outcome 不是 pr）或查不到 PR 编号 → 不触发', () => {
+  assert.deepEqual(runDispatch({ outcome: 'needs-user' }).log, []);
+  const r = runDispatch({ mode: 'new', pr: '' });
+  assert.equal(r.code, 0);
+  assert.ok(!r.log.some((l) => l.startsWith('workflow run')));
+});
+
+test('dispatch-review.sh：触发失败也退出 0（不让发布步骤变红）', () => {
+  assert.equal(runDispatch({ mode: 'fix', ghExit: 1 }).code, 0);
+});
+
+test('claude.yml：publish 的触发步骤受 CLOUD_REVIEW 控制、continue-on-error、位于发布步骤之后；actions: write 只给 publish', () => {
+  const yml = readFileSync(join(HERE, '../../.github/workflows/claude.yml'), 'utf8');
+  const pub = yml.slice(yml.indexOf('\n  publish:'));
+  assert.match(pub, /actions: write/);
+  assert.doesNotMatch(yml.slice(0, yml.indexOf('\n  publish:')), /actions: write/);
+  const step = pub.slice(pub.indexOf('- name: 触发云端审核'));
+  assert.match(step.split('- name:')[1] ? step.slice(0, 600) : step, /if: vars\.CLOUD_REVIEW == 'on'\n\s+continue-on-error: true/);
+  assert.ok(pub.indexOf('推送分支并开 PR 或评论') < pub.indexOf('触发云端审核') && pub.indexOf('触发云端审核') < pub.indexOf('发布失败时报告'));
+  assert.match(pub, /run: bash _devloop\/scripts\/devloop\/dispatch-review\.sh/);
 });
